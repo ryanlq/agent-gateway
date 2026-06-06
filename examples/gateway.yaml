@@ -1,0 +1,45 @@
+# Agent Gateway Configuration Example
+# Copy to gateway.yaml and fill in your tokens.
+
+platforms:
+  telegram:
+    enabled: true
+    token: ""              # Or set TELEGRAM_TOKEN env var
+    home_channel: ""       # Default chat for cron delivery
+    dm_policy: allowlist   # open | allowlist | closed
+    allow_from: []         # List of allowed Telegram user IDs
+
+  discord:
+    enabled: false
+    token: ""              # Or set DISCORD_TOKEN env var
+
+  slack:
+    enabled: false
+    token: ""              # Or set SLACK_TOKEN env var
+    app_token: ""          # For Socket Mode (SLACK_APP_TOKEN env var)
+
+  webhook:
+    enabled: false
+    host: "127.0.0.1"
+    port: 8080
+    path: "/webhook"
+    secret: ""             # Optional: X-Webhook-Secret header
+
+# Streaming response settings
+streaming:
+  enabled: true
+  min_edit_interval: 0.8   # Seconds between edit requests
+  use_draft: false         # Prefer native draft streaming
+  tool_progress: "all"     # all | new | verbose | none
+  tool_preview_length: 40  # Max characters of tool argument preview
+
+# Session management
+session:
+  max_idle_seconds: 3600   # 1 hour idle timeout
+  max_history: 200         # Max messages per session
+  reset_policy: "idle"     # daily | idle | both | none
+  cleanup_interval: 300    # 5 minutes between cleanup runs
+
+# Operational settings
+filter_silence_narration: true
+agent_timeout: 1800        # 30 minute agent processing timeout

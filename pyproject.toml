@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-gateway"
+version = "0.1.0"
+description = "A reusable multi-platform messaging gateway for AI agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Agent Gateway Contributors" }]
+keywords = ["ai", "agent", "gateway", "messaging", "telegram", "discord", "slack"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=21.0"]
+discord = ["discord.py>=2.3"]
+slack = ["slack-bolt>=1.18", "slack-sdk>=3.21"]
+webhook = ["fastapi>=0.100", "uvicorn>=0.23"]
+desktop = ["fastapi>=0.100", "uvicorn>=0.23", "websockets>=12.0"]
+all = [
+    "agent-gateway[telegram,discord,slack,webhook,desktop]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_gateway"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
