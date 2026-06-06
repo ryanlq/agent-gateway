@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from agent_gateway.agents.base import CLIAgentError
+from agent_gateway.server.agent_status import detect_agents
 from agent_gateway.server.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -156,32 +157,20 @@ async def handle_model_options(
     emit: Any,
     sessions: SessionManager,
 ) -> dict[str, Any]:
-    """Return available agent types as model providers."""
+    """Return available agents as model providers."""
+    agents = detect_agents()
     providers = [
         {
-            "slug": "claude-code",
-            "name": "Claude Code",
-            "is_current": sessions.default_agent_type == "claude-code",
-            "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
-            "authenticated": True,
-        },
-        {
-            "slug": "pi",
-            "name": "Pi Agent",
-            "is_current": sessions.default_agent_type == "pi",
-            "models": ["pi-default"],
-            "authenticated": True,
-        },
-        {
-            "slug": "codex",
-            "name": "OpenAI Codex",
-            "is_current": sessions.default_agent_type == "codex",
-            "models": ["codex-mini"],
-            "authenticated": True,
-        },
+            "slug": a["slug"],
+            "name": a["name"],
+            "models": ["default"],
+            "is_current": a["slug"] == sessions.default_agent_type,
+            "installed": a["installed"],
+        }
+        for a in agents
     ]
     return {
-        "model": sessions.default_agent_type,
+        "model": "default",
         "provider": sessions.default_agent_type,
         "providers": providers,
     }

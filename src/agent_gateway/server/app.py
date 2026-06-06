@@ -22,6 +22,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from agent_gateway.server.agent_status import detect_agents, get_installed_agent_types
 from agent_gateway.server.dispatcher import Dispatcher
 from agent_gateway.server.session_manager import SessionManager
 
@@ -64,6 +65,33 @@ def create_app(token: str) -> FastAPI:
             "active_sessions": len(sessions.list_sessions()),
             "auth_required": bool(token),
         }
+
+    # ------------------------------------------------------------------
+    # Agent detection
+    # ------------------------------------------------------------------
+
+    @app.get("/api/agents/status")
+    async def rest_agents_status(request: Request) -> dict[str, Any]:
+        """Detect installed agent CLIs and return their status."""
+        agents = detect_agents()
+        return {
+            "agents": agents,
+            "current": sessions.default_agent_type,
+        }
+
+    @app.post("/api/agents/switch")
+    async def rest_agents_switch(request: Request) -> dict[str, Any]:
+        """Switch the default agent type."""
+        body = await request.json() if await request.body() else {}
+        agent_type = body.get("agent", "")
+        session_id = body.get("session_id")
+
+        if session_id:
+            await sessions.set_agent(session_id, agent_type)
+        else:
+            sessions.default_agent_type = agent_type
+
+        return {"ok": True, "agent": agent_type}
 
     # ------------------------------------------------------------------
     # HTTP REST stubs — hermes-desktop expects these endpoints via
@@ -165,7 +193,13 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/config")
     async def rest_config(request: Request) -> dict[str, Any]:
-        return {"config": {"default_agent": sessions.default_agent_type}}
+        agents = detect_agents()
+        return {
+            "config": {
+                "default_agent": sessions.default_agent_type,
+            },
+            "agents": agents,
+        }
 
     @app.get("/api/config/defaults")
     async def rest_config_defaults(request: Request) -> dict[str, Any]:
@@ -173,7 +207,7 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/config/schema")
     async def rest_config_schema(request: Request) -> dict[str, Any]:
-        return {"schema": {}}
+        return {"fields": {}}
 
     @app.patch("/api/config")
     async def rest_config_set(request: Request) -> dict[str, Any]:
@@ -187,44 +221,45 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/model/info")
     async def rest_model_info(request: Request) -> dict[str, Any]:
+        """Return current agent as model info."""
         return {
-            "model": sessions.default_agent_type,
+            "model": "default",
             "provider": sessions.default_agent_type,
         }
 
     @app.get("/api/model/options")
     async def rest_model_options(request: Request) -> dict[str, Any]:
+        """Return available agents as model providers.
+
+        Each agent is presented as a "provider" with a single "default" model
+        so the existing ModelPickerDialog works as an agent picker.
+        """
+        agents = detect_agents()
+        providers = []
+        for agent in agents:
+            providers.append({
+                "slug": agent["slug"],
+                "name": agent["name"],
+                "description": agent.get("description", ""),
+                "models": ["default"],
+                "is_current": agent["slug"] == sessions.default_agent_type,
+                "total_models": 1,
+                "installed": agent["installed"],
+            })
         return {
-            "providers": [
-                {
-                    "slug": "claude-code",
-                    "name": "Claude Code",
-                    "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
-                    "is_current": True,
-                    "total_models": 2,
-                    "capabilities": {
-                        "claude-sonnet-4-6": {"fast": True, "reasoning": True},
-                        "claude-opus-4-8": {"fast": False, "reasoning": True},
-                    },
-                },
-                {
-                    "slug": "codex",
-                    "name": "OpenAI Codex",
-                    "models": ["codex-mini"],
-                    "is_current": False,
-                    "total_models": 1,
-                    "capabilities": {
-                        "codex-mini": {"fast": False, "reasoning": False},
-                    },
-                },
-            ],
-            "model": "claude-sonnet-4-6",
-            "provider": "claude-code",
+            "providers": providers,
+            "model": "default",
+            "provider": sessions.default_agent_type,
         }
 
     @app.post("/api/model/set")
     async def rest_model_set(request: Request) -> dict[str, Any]:
-        return {"ok": True}
+        """Switch the active agent. Provider field = agent slug."""
+        body = await request.json() if await request.body() else {}
+        provider = body.get("provider", "")
+        if provider:
+            sessions.default_agent_type = provider
+        return {"ok": True, "provider": provider, "model": body.get("model", "default")}
 
     @app.get("/api/model/auxiliary")
     async def rest_model_auxiliary(request: Request) -> dict[str, Any]:
