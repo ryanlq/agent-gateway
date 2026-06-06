@@ -71,21 +71,97 @@ def create_app(token: str) -> FastAPI:
     # renderer doesn't crash on 404s.
     # ------------------------------------------------------------------
 
+    # -- Sessions ----------------------------------------------------------
+
     @app.get("/api/sessions")
     async def rest_sessions(request: Request) -> dict[str, Any]:
+        return {"sessions": [], "total": 0, "offset": 0}
+
+    @app.get("/api/sessions/search")
+    async def rest_sessions_search(request: Request) -> dict[str, Any]:
         return {"sessions": [], "total": 0}
+
+    @app.post("/api/sessions")
+    async def rest_sessions_create(request: Request) -> dict[str, Any]:
+        body = await request.json() if await request.body() else {}
+        s = await sessions.create_session(cwd=body.get("cwd"))
+        return {"session_id": s.session_id, "stored_session_id": None}
 
     @app.get("/api/sessions/{session_id}")
     async def rest_session_detail(session_id: str) -> dict[str, Any]:
         s = sessions.get_session(session_id)
         if s:
             return s.to_dict()
-        return {"error": "not found"}
+        return {"id": session_id, "title": "Chat", "message_count": 0,
+                "created_at": 0, "archived": False}
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rest_session_update(session_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.delete("/api/sessions/{session_id}")
+    async def rest_session_delete(session_id: str) -> dict[str, Any]:
+        return {"ok": True}
 
     @app.get("/api/sessions/{session_id}/messages")
     async def rest_session_messages(session_id: str) -> dict[str, Any]:
         s = sessions.get_session(session_id)
         return {"messages": s.history if s else []}
+
+    @app.post("/api/sessions/{session_id}/resume")
+    async def rest_session_resume(session_id: str) -> dict[str, Any]:
+        s = sessions.get_session(session_id)
+        if s:
+            return {"session_id": s.session_id, "resumed": True,
+                    "messages": s.history}
+        return {"error": "not found"}
+
+    @app.post("/api/sessions/{session_id}/branch")
+    async def rest_session_branch(session_id: str) -> dict[str, Any]:
+        s = await sessions.create_session()
+        return {"session_id": s.session_id, "branched": True}
+
+    # -- Profiles ----------------------------------------------------------
+
+    @app.get("/api/profiles")
+    async def rest_profiles_list(request: Request) -> dict[str, Any]:
+        return {"profiles": [{"name": "default", "active": True}],
+                "active": "default"}
+
+    @app.get("/api/profiles/active")
+    async def rest_profiles_active(request: Request) -> dict[str, Any]:
+        return {"profile": "default", "current": "default"}
+
+    @app.get("/api/profiles/sessions")
+    async def rest_profiles_sessions(request: Request) -> dict[str, Any]:
+        return {"sessions": [], "total": 0, "profile_totals": {}}
+
+    @app.post("/api/profiles")
+    async def rest_profiles_create(request: Request) -> dict[str, Any]:
+        body = await request.json() if await request.body() else {}
+        return {"name": body.get("name", "new"), "ok": True, "path": ""}
+
+    @app.patch("/api/profiles/{name}")
+    async def rest_profiles_update(name: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.delete("/api/profiles/{name}")
+    async def rest_profiles_delete(name: str) -> dict[str, Any]:
+        return {"ok": True, "path": ""}
+
+    @app.get("/api/profiles/{name}/soul")
+    async def rest_profiles_soul(name: str) -> dict[str, Any]:
+        return {"content": ""}
+
+    @app.put("/api/profiles/{name}/soul")
+    async def rest_profiles_soul_update(name: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.get("/api/profiles/{name}/setup-command")
+    async def rest_profiles_setup_command(name: str) -> dict[str, Any]:
+        return {"command": ""}
+
+    # -- Config ------------------------------------------------------------
 
     @app.get("/api/config")
     async def rest_config(request: Request) -> dict[str, Any]:
@@ -103,6 +179,12 @@ def create_app(token: str) -> FastAPI:
     async def rest_config_set(request: Request) -> dict[str, Any]:
         return {"updated": True}
 
+    @app.put("/api/config")
+    async def rest_config_put(request: Request) -> dict[str, Any]:
+        return {"ok": True}
+
+    # -- Model -------------------------------------------------------------
+
     @app.get("/api/model/info")
     async def rest_model_info(request: Request) -> dict[str, Any]:
         return {
@@ -110,33 +192,126 @@ def create_app(token: str) -> FastAPI:
             "provider": sessions.default_agent_type,
         }
 
+    @app.get("/api/model/options")
+    async def rest_model_options(request: Request) -> dict[str, Any]:
+        return {
+            "providers": [
+                {
+                    "slug": "claude-code",
+                    "name": "Claude Code",
+                    "models": ["claude-sonnet-4-6", "claude-opus-4-8"],
+                    "is_current": True,
+                    "total_models": 2,
+                    "capabilities": {
+                        "claude-sonnet-4-6": {"fast": True, "reasoning": True},
+                        "claude-opus-4-8": {"fast": False, "reasoning": True},
+                    },
+                },
+                {
+                    "slug": "codex",
+                    "name": "OpenAI Codex",
+                    "models": ["codex-mini"],
+                    "is_current": False,
+                    "total_models": 1,
+                    "capabilities": {
+                        "codex-mini": {"fast": False, "reasoning": False},
+                    },
+                },
+            ],
+            "model": "claude-sonnet-4-6",
+            "provider": "claude-code",
+        }
+
+    @app.post("/api/model/set")
+    async def rest_model_set(request: Request) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.get("/api/model/auxiliary")
+    async def rest_model_auxiliary(request: Request) -> dict[str, Any]:
+        return {"models": {}}
+
+    @app.get("/api/model/recommended-default")
+    async def rest_model_recommended_default(request: Request) -> dict[str, Any]:
+        return {"provider": "claude-code", "model": "claude-sonnet-4-6",
+                "free_tier": None}
+
+    # -- Env ---------------------------------------------------------------
+
     @app.get("/api/env")
     async def rest_env(request: Request) -> dict[str, Any]:
         return {"env": {}}
 
     @app.patch("/api/env")
     async def rest_env_set(request: Request) -> dict[str, Any]:
-        return {"updated": True}
+        return {"ok": True}
+
+    @app.put("/api/env")
+    async def rest_env_put(request: Request) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.delete("/api/env")
+    async def rest_env_delete(request: Request) -> dict[str, Any]:
+        return {"ok": True}
 
     @app.get("/api/env/reveal")
     async def rest_env_reveal(request: Request) -> dict[str, Any]:
         return {"values": {}}
 
-    @app.get("/api/skills")
-    async def rest_skills(request: Request) -> dict[str, Any]:
-        return {"skills": []}
+    @app.post("/api/env/reveal")
+    async def rest_env_reveal_post(request: Request) -> dict[str, Any]:
+        return {"key": "", "value": ""}
 
-    @app.post("/api/skills/toggle")
+    # -- Providers ---------------------------------------------------------
+
+    @app.get("/api/providers/validate")
+    async def rest_providers_validate(request: Request) -> dict[str, Any]:
+        return {"ok": True, "reachable": True, "message": "ok"}
+
+    @app.post("/api/providers/validate")
+    async def rest_providers_validate_post(request: Request) -> dict[str, Any]:
+        return {"ok": True, "reachable": True, "message": "ok"}
+
+    @app.get("/api/providers/oauth")
+    async def rest_providers_oauth(request: Request) -> dict[str, Any]:
+        return {"providers": []}
+
+    @app.post("/api/providers/oauth/{provider_id}/start")
+    async def rest_oauth_start(provider_id: str) -> dict[str, Any]:
+        return {"session_id": "", "auth_url": ""}
+
+    @app.post("/api/providers/oauth/{provider_id}/submit")
+    async def rest_oauth_submit(provider_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.get("/api/providers/oauth/{provider_id}/poll/{session_id}")
+    async def rest_oauth_poll(provider_id: str, session_id: str) -> dict[str, Any]:
+        return {"status": "complete"}
+
+    @app.delete("/api/providers/oauth/sessions/{session_id}")
+    async def rest_oauth_cancel_session(session_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    # -- Skills & Tools ----------------------------------------------------
+
+    @app.get("/api/skills")
+    async def rest_skills(request: Request) -> list:
+        return []
+
+    @app.put("/api/skills/toggle")
     async def rest_skills_toggle(request: Request) -> dict[str, Any]:
-        return {"toggled": True}
+        return {"ok": True, "name": "", "enabled": True}
 
     @app.get("/api/tools/toolsets")
-    async def rest_toolsets(request: Request) -> dict[str, Any]:
-        return {"toolsets": []}
+    async def rest_toolsets(request: Request) -> list:
+        return []
 
     @app.get("/api/tools/toolsets/{name}")
     async def rest_toolset_detail(name: str) -> dict[str, Any]:
-        return {"name": name, "enabled": True}
+        return {"name": name, "enabled": True, "tools": []}
+
+    @app.put("/api/tools/toolsets/{name}")
+    async def rest_toolset_toggle(name: str) -> dict[str, Any]:
+        return {"ok": True, "name": name, "enabled": True}
 
     @app.get("/api/tools/toolsets/{name}/config")
     async def rest_toolset_config(name: str) -> dict[str, Any]:
@@ -148,27 +323,106 @@ def create_app(token: str) -> FastAPI:
 
     @app.patch("/api/tools/toolsets/{name}/provider")
     async def rest_toolset_provider_set(name: str) -> dict[str, Any]:
-        return {"updated": True}
+        return {"ok": True}
+
+    # -- Logs --------------------------------------------------------------
 
     @app.get("/api/logs")
     async def rest_logs(request: Request) -> dict[str, Any]:
-        return {"logs": []}
+        return {"logs": [], "lines": []}
 
-    @app.get("/api/providers/validate")
-    async def rest_providers_validate(request: Request) -> dict[str, Any]:
-        return {"valid": True}
+    # -- Messaging ---------------------------------------------------------
 
-    @app.get("/api/providers/oauth")
-    async def rest_providers_oauth(request: Request) -> dict[str, Any]:
-        return {"providers": []}
+    @app.get("/api/messaging/platforms")
+    async def rest_messaging_platforms(request: Request) -> dict[str, Any]:
+        return {"platforms": []}
 
-    @app.get("/api/profiles/active")
-    async def rest_profiles_active(request: Request) -> dict[str, Any]:
-        return {"profile": None}
+    @app.put("/api/messaging/platforms/{platform_id}")
+    async def rest_messaging_platform_update(platform_id: str) -> dict[str, Any]:
+        return {"ok": True, "platform": platform_id}
 
-    @app.get("/api/profiles/sessions")
-    async def rest_profiles_sessions(request: Request) -> dict[str, Any]:
-        return {"sessions": []}
+    @app.post("/api/messaging/platforms/{platform_id}/test")
+    async def rest_messaging_platform_test(platform_id: str) -> dict[str, Any]:
+        return {"ok": True, "connected": False}
+
+    # -- Cron --------------------------------------------------------------
+
+    @app.get("/api/cron/jobs")
+    async def rest_cron_jobs(request: Request) -> list:
+        return []
+
+    @app.post("/api/cron/jobs")
+    async def rest_cron_create(request: Request) -> dict[str, Any]:
+        return {"id": "", "ok": True}
+
+    @app.get("/api/cron/jobs/{job_id}")
+    async def rest_cron_job(job_id: str) -> dict[str, Any]:
+        return {"id": job_id}
+
+    @app.patch("/api/cron/jobs/{job_id}")
+    async def rest_cron_update(job_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.put("/api/cron/jobs/{job_id}")
+    async def rest_cron_update_put(job_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.delete("/api/cron/jobs/{job_id}")
+    async def rest_cron_delete(job_id: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.post("/api/cron/jobs/{job_id}/pause")
+    async def rest_cron_pause(job_id: str) -> dict[str, Any]:
+        return {"ok": True, "id": job_id}
+
+    @app.post("/api/cron/jobs/{job_id}/resume")
+    async def rest_cron_resume(job_id: str) -> dict[str, Any]:
+        return {"ok": True, "id": job_id}
+
+    @app.post("/api/cron/jobs/{job_id}/trigger")
+    async def rest_cron_trigger(job_id: str) -> dict[str, Any]:
+        return {"ok": True, "id": job_id}
+
+    # -- Analytics ---------------------------------------------------------
+
+    @app.get("/api/analytics/usage")
+    async def rest_analytics_usage(request: Request) -> dict[str, Any]:
+        return {"daily": [], "models": [], "skills": [],
+                "totals": {}, "skills_summary": {}}
+
+    # -- Audio -------------------------------------------------------------
+
+    @app.post("/api/audio/transcribe")
+    async def rest_audio_transcribe(request: Request) -> dict[str, Any]:
+        return {"text": ""}
+
+    @app.post("/api/audio/speak")
+    async def rest_audio_speak(request: Request) -> dict[str, Any]:
+        return {"audio_url": ""}
+
+    @app.get("/api/audio/elevenlabs/voices")
+    async def rest_elevenlabs_voices(request: Request) -> dict[str, Any]:
+        return {"voices": []}
+
+    # -- Gateway / Updates / Actions ----------------------------------------
+
+    @app.post("/api/gateway/restart")
+    async def rest_gateway_restart(request: Request) -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.post("/api/hermes/update")
+    async def rest_hermes_update(request: Request) -> dict[str, Any]:
+        return {"ok": True, "updated": False}
+
+    @app.get("/api/actions/{name}/status")
+    async def rest_action_status(name: str) -> dict[str, Any]:
+        return {"name": name, "status": "idle", "running": False, "lines": []}
+
+    # -- Auth (WebSocket ticket for OAuth) ---------------------------------
+
+    @app.post("/api/auth/ws-ticket")
+    async def rest_auth_ws_ticket(request: Request) -> dict[str, Any]:
+        return {"ticket": ""}
 
     # ------------------------------------------------------------------
     # WebSocket JSON-RPC endpoint
