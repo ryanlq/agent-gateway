@@ -46,7 +46,22 @@ def main() -> None:
 
     app = create_app(token)
     print(f"[agent-gateway] Starting server on {args.host}:{args.port}", file=sys.stderr)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+    # Configure uvicorn with graceful shutdown
+    config = uvicorn.Config(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+        timeout_graceful_shutdown=10,  # Give bridges 10s to clean up
+    )
+    server = uvicorn.Server(config)
+
+    try:
+        import asyncio
+        asyncio.run(server.serve())
+    except KeyboardInterrupt:
+        pass  # Server handles cleanup via lifespan
 
 
 if __name__ == "__main__":

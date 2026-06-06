@@ -232,6 +232,22 @@ class SubprocessPool:
             await self.terminate(key)
         return len(expired)
 
+    def terminate_all_sync(self) -> int:
+        """Force-kill all pooled processes synchronously (last-resort cleanup)."""
+        count = 0
+        for key in list(self._pool):
+            pp = self._pool.pop(key, None)
+            if pp is None:
+                continue
+            try:
+                pp.process.kill()
+                count += 1
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+        return count
+
     # -- Properties ----------------------------------------------------------
 
     @property
@@ -494,6 +510,8 @@ class CLIAgentBridge(ABC):
         if self.config.env:
             env.update(self.config.env)
 
+        self._logger.debug("Streaming: %s", " ".join(args))
+
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
@@ -503,7 +521,7 @@ class CLIAgentBridge(ABC):
             cwd=self.config.cwd,
         )
 
-        # Write input
+        # Write input and close stdin so the process knows we're done sending
         if input_text and proc.stdin:
             proc.stdin.write(input_text.encode())
             proc.stdin.close()
@@ -513,21 +531,40 @@ class CLIAgentBridge(ABC):
             async for raw_line in proc.stdout:
                 total_bytes += len(raw_line)
                 if total_bytes > self.config.max_output_bytes:
+                    self._logger.warning("Streaming output exceeded %d bytes, killing process", self.config.max_output_bytes)
                     proc.kill()
                     break
                 line = raw_line.decode(errors="replace").rstrip("\n")
                 if line:
                     yield line
         except asyncio.TimeoutError:
+            self._logger.warning("Streaming subprocess timed out after %.1fs", effective_timeout)
             proc.kill()
+        except asyncio.CancelledError:
+            self._logger.debug("Streaming cancelled, killing subprocess")
+            proc.kill()
+            raise
+        finally:
+            # Always reap the process to prevent zombie processes
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self._logger.warning("Process (pid %d) did not exit after kill, sending SIGKILL", proc.pid or 0)
+                proc.kill()
+                await proc.wait()
 
-        await proc.wait()
+            returncode = proc.returncode or 0
+            self._logger.debug("Streaming process exited (code %d, %d bytes)", returncode, total_bytes)
 
     # -- Cleanup ------------------------------------------------------------
 
     async def shutdown(self) -> None:
         """Clean up any pooled subprocesses."""
         if self._pool:
-            count = await self._pool.terminate_all()
-            if count:
-                self._logger.info("Shut down %d pooled processes", count)
+            try:
+                count = await asyncio.wait_for(self._pool.terminate_all(), timeout=10.0)
+                if count:
+                    self._logger.info("Shut down %d pooled processes", count)
+            except asyncio.TimeoutError:
+                self._logger.warning("Timed out shutting down pooled processes, forcing kill")
+                self._pool.terminate_all_sync()

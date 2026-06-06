@@ -13,6 +13,7 @@ and request/response via standard JSON-RPC frames.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -21,6 +22,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 
 from agent_gateway.server.agent_status import detect_agents, get_installed_agent_types
 from agent_gateway.server.dispatcher import Dispatcher
@@ -31,9 +33,26 @@ logger = logging.getLogger(__name__)
 
 def create_app(token: str) -> FastAPI:
     """Create and configure the FastAPI application."""
-    app = FastAPI(title="Agent Gateway", version="0.1.0")
+
     sessions = SessionManager()
     dispatcher = Dispatcher(sessions)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Graceful startup/shutdown: close all sessions on exit."""
+        logger.info("Agent Gateway starting up")
+        yield
+        # Cleanup: close all sessions and their bridge subprocesses
+        logger.info("Agent Gateway shutting down, closing %d sessions", len(sessions.list_sessions()))
+        try:
+            closed = await asyncio.wait_for(sessions.close_all(), timeout=15.0)
+            logger.info("Closed %d sessions", closed)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out closing sessions during shutdown (15s)")
+        except Exception as exc:
+            logger.error("Error during shutdown: %s", exc)
+
+    app = FastAPI(title="Agent Gateway", version="0.1.0", lifespan=lifespan)
 
     # Register RPC method handlers
     from agent_gateway.server import methods as m

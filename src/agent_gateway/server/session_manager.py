@@ -7,6 +7,7 @@ conversation history in memory.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -77,17 +78,29 @@ class SessionManager:
         session = self._sessions.pop(session_id, None)
         if session is None:
             return False
-        await session.bridge.shutdown()
+        try:
+            await asyncio.wait_for(session.bridge.shutdown(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out shutting down bridge for session %s", session_id)
+        except Exception as exc:
+            logger.error("Error shutting down bridge for session %s: %s", session_id, exc)
         logger.info("Closed session %s", session_id)
         return True
 
     async def close_all(self) -> int:
-        """Close all sessions. Returns count closed."""
-        count = 0
-        for sid in list(self._sessions):
-            if await self.close_session(sid):
-                count += 1
-        return count
+        """Close all sessions concurrently with timeout per session."""
+        session_ids = list(self._sessions)
+        if not session_ids:
+            return 0
+
+        # Close all sessions in parallel for faster shutdown
+        results = await asyncio.gather(
+            *[self.close_session(sid) for sid in session_ids],
+            return_exceptions=True,
+        )
+        closed = sum(1 for r in results if r is True)
+        logger.info("Closed %d/%d sessions", closed, len(session_ids))
+        return closed
 
     def get_session(self, session_id: str) -> DesktopSession | None:
         """Get a session by ID."""
@@ -102,8 +115,13 @@ class SessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             return None
-        # Shutdown old bridge
-        await session.bridge.shutdown()
+        # Shutdown old bridge with timeout
+        try:
+            await asyncio.wait_for(session.bridge.shutdown(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out shutting down old bridge for session %s", session_id)
+        except Exception as exc:
+            logger.error("Error shutting down old bridge for session %s: %s", session_id, exc)
         # Create new bridge
         session.agent_type = agent_type
         session.bridge = create_bridge(agent_type)
