@@ -186,6 +186,7 @@ class DeliveryRouter:
         job_id: Optional[str] = None,
         job_name: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        reply_to: Optional[str] = None,
     ) -> dict[str, Any]:
         """Deliver *content* to a single target.
 
@@ -196,7 +197,7 @@ class DeliveryRouter:
                 result = self._deliver_local(content, job_id, job_name, metadata)
                 return {"success": True, "target": target.to_string(), "result": result}
 
-            return await self._deliver_to_platform(target, content, metadata)
+            return await self._deliver_to_platform(target, content, metadata, reply_to=reply_to)
 
         except Exception as exc:
             logger.error("Delivery to %s failed: %s", target.to_string(), exc)
@@ -224,6 +225,8 @@ class DeliveryRouter:
         target: DeliveryTarget,
         content: str,
         metadata: Optional[dict[str, Any]],
+        *,
+        reply_to: Optional[str] = None,
     ) -> dict[str, Any]:
         """Deliver content to a messaging platform."""
         adapter = self.adapters.get(target.platform)
@@ -254,7 +257,10 @@ class DeliveryRouter:
         if target.thread_id:
             send_meta["thread_id"] = target.thread_id
 
-        result = await adapter.send(target.chat_id, outbound, metadata=send_meta or None)
+        result = await adapter.send(
+            target.chat_id, outbound,
+            reply_to=reply_to, metadata=send_meta or None,
+        )
 
         if getattr(result, "success", False):
             return {"success": True, "message_id": getattr(result, "message_id", None)}
