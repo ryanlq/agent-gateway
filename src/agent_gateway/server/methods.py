@@ -96,7 +96,13 @@ async def handle_prompt_submit(
 ) -> dict[str, Any]:
     """Submit a prompt and stream the response back as events.
 
-    Emits: message.start, message.delta*, message.complete
+    Returns immediately so the JSON-RPC response doesn't block on the
+    (potentially long-running) CLI invocation.  The actual streaming
+    happens in a background asyncio task that emits events:
+
+      - message.start  — before the first chunk
+      - message.delta* — each text chunk as it arrives
+      - message.complete — after the last chunk
     """
     session_id = params.get("session_id", "")
     text = params.get("text", "")
@@ -111,6 +117,23 @@ async def handle_prompt_submit(
         session = await sessions.create_session()
         session_id = session.session_id
 
+    # Fire-and-forget: run the actual streaming in a background task
+    asyncio.create_task(
+        _run_prompt(session_id, text, session, emit, sessions),
+    )
+
+    # Return immediately — events will arrive asynchronously
+    return {"status": "ok"}
+
+
+async def _run_prompt(
+    session_id: str,
+    text: str,
+    session: Any,
+    emit: Any,
+    sessions: SessionManager,
+) -> None:
+    """Background task that streams a prompt and emits events."""
     # Push message.start
     await emit("message.start", {}, session_id)
 
@@ -149,8 +172,6 @@ async def handle_prompt_submit(
 
     # Push message.complete
     await emit("message.complete", {"text": response_text}, session_id)
-
-    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
