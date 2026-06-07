@@ -127,8 +127,16 @@ def try_create_runner() -> Optional[Any]:
     # Register adapters so the runner can find them
     register_builtin_adapters()
 
+    # Share the desktop session store so platform conversations appear in the UI
+    from agent_gateway.server.session_store import SessionStore as DesktopStore
+    desktop_store = DesktopStore()
+
     # Create runner with an agent callback that uses the desktop's bridge system
-    runner = GatewayRunner(gw_config, agent_callback=make_agent_callback())
+    runner = GatewayRunner(
+        gw_config,
+        agent_callback=make_agent_callback(),
+        desktop_store=desktop_store,
+    )
     return runner
 
 

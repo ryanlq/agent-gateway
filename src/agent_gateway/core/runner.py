@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import signal
 from typing import Any, Awaitable, Callable, Optional, Union
 
@@ -71,10 +72,12 @@ class GatewayRunner:
         agent: AgentCore = None,
         *,
         agent_callback: AgentCallback | None = None,
+        desktop_store: Any = None,
     ) -> None:
         self.config = config
         self.agent = agent
         self._agent_callback = agent_callback
+        self._desktop_store = desktop_store
 
         # Runtime state
         self.adapters: dict[str, BasePlatformAdapter] = {}
@@ -209,6 +212,10 @@ class GatewayRunner:
         session.add_message("user", user_input)
         if response:
             session.add_message("assistant", response)
+
+        # 8. Sync to desktop session store so conversations appear in UI
+        if self._desktop_store and source:
+            self._sync_to_desktop(source, user_input, response, event)
 
         return None  # Response already delivered via streaming or direct send
 
@@ -422,6 +429,57 @@ class GatewayRunner:
                 "⏳ I'm still processing your previous message. Please wait...",
             )
         return False
+
+    # ------------------------------------------------------------------
+    # Desktop session sync
+    # ------------------------------------------------------------------
+
+    def _sync_to_desktop(
+        self,
+        source: MessageSource,
+        user_input: str,
+        response: Optional[str],
+        event: MessageEvent,
+    ) -> None:
+        """Sync platform messages to the desktop session store.
+
+        Writes user messages and agent responses into the persistent
+        ``~/.nexus-agent/sessions.json`` so they appear in the desktop
+        client sidebar.
+        """
+        store = self._desktop_store
+        if store is None:
+            return
+
+        # Deterministic session ID: same sender → same desktop session
+        sender = source.user_id.replace("@", "-").replace(".", "-")
+        desktop_sid = f"email-{sender}"
+
+        existing = store.get(desktop_sid)
+        if existing is None:
+            # First message from this sender — create desktop session
+            title = (user_input or "")[:60].split("\n")[0] or f"Email: {source.display_name}"
+            store.create(
+                session_id=desktop_sid,
+                agent_type=source.platform,
+                title=title,
+            )
+            history: list[dict[str, Any]] = []
+        else:
+            history = list(existing.history)
+
+        # Append messages
+        history.append({"role": "user", "content": user_input})
+        if response:
+            history.append({"role": "assistant", "content": str(response)})
+
+        # Persist
+        store.update_history(desktop_sid, history)
+        store.update(
+            desktop_sid,
+            last_active=time.time(),
+        )
+        logger.debug("Synced %d messages to desktop session %s", len(history), desktop_sid)
 
     def _process_media(self, event: MessageEvent) -> Optional[str]:
         """Build a media description for the agent."""
