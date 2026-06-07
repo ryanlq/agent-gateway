@@ -18,7 +18,7 @@ import hmac
 import json
 import logging
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -32,8 +32,13 @@ from agent_gateway.server.session_store import SessionStore
 logger = logging.getLogger(__name__)
 
 
-def create_app(token: str) -> FastAPI:
-    """Create and configure the FastAPI application."""
+def create_app(token: str, runner: Any = None) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    Args:
+        token: Authentication token for WebSocket connections.
+        runner: Optional ``GatewayRunner`` for platform adapters (Email, etc.).
+    """
 
     store = SessionStore()
     sessions = SessionManager(session_store=store)
@@ -41,9 +46,30 @@ def create_app(token: str) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """Graceful startup/shutdown: close all sessions on exit."""
+        """Graceful startup/shutdown: manage sessions and platform adapters."""
         logger.info("Agent Gateway starting up")
+
+        # Start platform adapters if runner is provided
+        if runner:
+            try:
+                await runner.start()
+                adapter_names = list(runner.adapters.keys())
+                if adapter_names:
+                    logger.info("Platform adapters started: %s", ", ".join(adapter_names))
+                    print(f"[agent-gateway] Platform adapters: {', '.join(adapter_names)}", file=__import__('sys').stderr)
+            except Exception as exc:
+                logger.error("Failed to start platform adapters: %s", exc)
+
         yield
+
+        # Stop platform adapters
+        if runner:
+            try:
+                await runner.shutdown()
+                logger.info("Platform adapters stopped")
+            except Exception as exc:
+                logger.error("Error shutting down platform adapters: %s", exc)
+
         # Cleanup: close all sessions and their bridge subprocesses
         logger.info("Agent Gateway shutting down, closing %d sessions", len(sessions.list_sessions()))
         try:
@@ -456,6 +482,18 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/messaging/platforms")
     async def rest_messaging_platforms(request: Request) -> dict[str, Any]:
+        """Return status of messaging platform adapters."""
+        if runner and runner.adapters:
+            platforms = []
+            for name, adapter in runner.adapters.items():
+                platforms.append({
+                    "id": name,
+                    "name": adapter.name,
+                    "enabled": adapter.is_connected,
+                    "configured": adapter.is_connected,
+                    "gateway_running": adapter.is_connected,
+                })
+            return {"platforms": platforms}
         return {"platforms": []}
 
     @app.put("/api/messaging/platforms/{platform_id}")

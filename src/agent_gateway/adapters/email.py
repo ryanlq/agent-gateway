@@ -280,19 +280,23 @@ class EmailAdapter(BasePlatformAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._address = config.get("address") or os.getenv("EMAIL_ADDRESS", "")
-        self._password = config.get("password") or os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = config.get("imap_host") or os.getenv("EMAIL_IMAP_HOST", "")
-        self._imap_port = int(config.get("imap_port") or os.getenv("EMAIL_IMAP_PORT", "993"))
-        self._smtp_host = config.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
-        self._smtp_port = int(config.get("smtp_port") or os.getenv("EMAIL_SMTP_PORT", "587"))
-        self._poll_interval = int(config.get("poll_interval") or os.getenv("EMAIL_POLL_INTERVAL", "15"))
+        # When called via GatewayRunner, config is PlatformConfig.__dict__ which
+        # nests all YAML fields under "extra".  Flatten so we read from one level.
+        cfg = config.get("extra") if isinstance(config.get("extra"), dict) else config
+
+        self._address = cfg.get("address") or os.getenv("EMAIL_ADDRESS", "")
+        self._password = cfg.get("password") or os.getenv("EMAIL_PASSWORD", "")
+        self._imap_host = cfg.get("imap_host") or os.getenv("EMAIL_IMAP_HOST", "")
+        self._imap_port = int(cfg.get("imap_port") or os.getenv("EMAIL_IMAP_PORT", "993"))
+        self._smtp_host = cfg.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
+        self._smtp_port = int(cfg.get("smtp_port") or os.getenv("EMAIL_SMTP_PORT", "587"))
+        self._poll_interval = int(cfg.get("poll_interval") or os.getenv("EMAIL_POLL_INTERVAL", "15"))
 
         # Skip attachments — configured via gateway.yaml or config dict
-        self._skip_attachments = config.get("skip_attachments", False)
+        self._skip_attachments = cfg.get("skip_attachments", False)
 
         # Access control — config dict > env var
-        raw_allowed = config.get("allowed_users") or os.getenv("EMAIL_ALLOWED_USERS", "")
+        raw_allowed = cfg.get("allowed_users") or os.getenv("EMAIL_ALLOWED_USERS", "")
         if isinstance(raw_allowed, list):
             self._allowed_users: set[str] = {a.strip().lower() for a in raw_allowed if a.strip()}
         elif isinstance(raw_allowed, str) and raw_allowed.strip():
@@ -300,7 +304,7 @@ class EmailAdapter(BasePlatformAdapter):
         else:
             self._allowed_users = set()
 
-        raw_allow_all = config.get("allow_all_users") or os.getenv("EMAIL_ALLOW_ALL_USERS", "")
+        raw_allow_all = cfg.get("allow_all_users") or os.getenv("EMAIL_ALLOW_ALL_USERS", "")
         self._allow_all_users = str(raw_allow_all).lower() in ("true", "1", "yes")
 
         self._media_cache = MediaCache()
