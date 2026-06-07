@@ -1,5 +1,5 @@
 """
-FastAPI application for hermes-desktop integration.
+FastAPI application for nexus-agent integration.
 
 Exposes:
   - ``GET /api/status``  — readiness probe used by Electron main process
@@ -113,7 +113,7 @@ def create_app(token: str) -> FastAPI:
         return {"ok": True, "agent": agent_type}
 
     # ------------------------------------------------------------------
-    # HTTP REST stubs — hermes-desktop expects these endpoints via
+    # HTTP REST stubs — nexus-agent expects these endpoints via
     # window.hermesDesktop.api().  Return minimal valid responses so the
     # renderer doesn't crash on 404s.
     # ------------------------------------------------------------------

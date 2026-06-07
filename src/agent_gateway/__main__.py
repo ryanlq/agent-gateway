@@ -1,7 +1,7 @@
 """
 Entry point for ``python -m agent_gateway``.
 
-Starts a FastAPI + WebSocket JSON-RPC server that hermes-desktop
+Starts a FastAPI + WebSocket JSON-RPC server that nexus-agent
 connects to for agent chat sessions.
 
 Usage::
@@ -20,7 +20,7 @@ import sys
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="agent_gateway",
-        description="Agent Gateway server for hermes-desktop integration",
+        description="Agent Gateway server for nexus-agent integration",
     )
     parser.add_argument("--port", type=int, default=9119, help="Listen port (default: 9119)")
     parser.add_argument("--host", default="127.0.0.1", help="Listen host (default: 127.0.0.1)")
