@@ -326,13 +326,14 @@ class CLIAgentBridge(ABC):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str = "",
+        session_ref: str | None = None,
     ) -> str:
         """Agent interface called by ``GatewayRunner._invoke_agent()``.
 
         Spawns a subprocess, sends the formatted prompt, and returns
         the parsed response string.
         """
-        args = self._build_args(session_key, message, history, system_extra)
+        args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
         prompt = self._format_prompt(message, history, system_extra)
 
         try:
@@ -368,12 +369,13 @@ class CLIAgentBridge(ABC):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str = "",
+        session_ref: str | None = None,
     ) -> AsyncIterator[str]:
         """Streaming interface called by ``GatewayRunner._call_agent_streaming()``.
 
         Yields incremental text chunks from subprocess stdout.
         """
-        args = self._build_args(session_key, message, history, system_extra)
+        args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
         prompt = self._format_prompt(message, history, system_extra)
 
         async for chunk in self._run_subprocess_streaming(args, input_text=prompt):
@@ -399,6 +401,8 @@ class CLIAgentBridge(ABC):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        *,
+        session_ref: str | None = None,
     ) -> list[str]:
         """Build CLI command arguments for this invocation."""
 

@@ -89,14 +89,20 @@ class PiAgentBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        *,
+        session_ref: str | None = None,
     ) -> list[str]:
         """Build CLI args based on mode."""
         if self.mode == "print":
             args = [self.command, "--print"]
+            if session_ref:
+                args.extend(["--session", session_ref])
             args.extend(self.extra_args)
             return args
         elif self.mode == "json":
             args = [self.command, "--mode", "json"]
+            if session_ref:
+                args.extend(["--session", session_ref])
             args.extend(self.extra_args)
             return args
         else:  # rpc
@@ -168,12 +174,13 @@ class PiAgentBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str = "",
+        session_ref: str | None = None,
     ) -> str:
         """Send a prompt and return the response."""
         if self.mode == "rpc" and self._pool:
             return await self._chat_rpc(session_key, message, history, system_extra)
         # print / json modes: use base class (spawn + collect)
-        return await super().chat(session_key, message, history, system_extra)
+        return await super().chat(session_key, message, history, system_extra, session_ref=session_ref)
 
     async def stream(
         self,
@@ -181,17 +188,18 @@ class PiAgentBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str = "",
+        session_ref: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream response chunks."""
         if self.mode == "json":
-            async for chunk in self._stream_json(session_key, message, history, system_extra):
+            async for chunk in self._stream_json(session_key, message, history, system_extra, session_ref=session_ref):
                 yield chunk
         elif self.mode == "rpc" and self._pool:
             async for chunk in self._stream_rpc(session_key, message, history, system_extra):
                 yield chunk
         else:
             # print mode: use base streaming (line-by-line stdout)
-            args = self._build_args(session_key, message, history, system_extra)
+            args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
             prompt = self._format_prompt(message, history, system_extra)
             async for line in self._run_subprocess_streaming(args, input_text=prompt):
                 cleaned = _strip_ansi(line).strip()
@@ -206,9 +214,12 @@ class PiAgentBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        session_ref: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream using ``pi --mode json``, parsing JSONL events."""
         args = [self.command, "--mode", "json"]
+        if session_ref:
+            args.extend(["--session", session_ref])
         args.extend(self.extra_args)
         prompt = self._format_prompt(message, history, system_extra)
 

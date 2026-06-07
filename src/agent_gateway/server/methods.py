@@ -38,7 +38,7 @@ async def handle_session_create(
     )
     return {
         "session_id": session.session_id,
-        "stored_session_id": None,
+        "stored_session_id": session.session_id,
         "info": _session_info(session),
     }
 
@@ -48,13 +48,14 @@ async def handle_session_resume(
     emit: Any,
     sessions: SessionManager,
 ) -> dict[str, Any]:
-    """Resume an existing session."""
+    """Resume an existing session (in-memory or rehydrated from file store)."""
     session_id = params.get("session_id") or params.get("stored_session_id")
     session = await sessions.resume_session(session_id)
     if session is None:
         return {"error": f"Session {session_id} not found"}
     return {
         "session_id": session.session_id,
+        "stored_session_id": session.session_id,
         "resumed": True,
         "messages": session.history,
         "message_count": len(session.history),
@@ -120,6 +121,7 @@ async def handle_prompt_submit(
             message=text,
             history=session.history,
             system_extra="",
+            session_ref=session.backend_session_ref,
         ):
             full_text.append(chunk)
             await emit("message.delta", {"text": chunk}, session_id)
@@ -141,6 +143,9 @@ async def handle_prompt_submit(
     # Update history
     session.history.append({"role": "user", "content": text})
     session.history.append({"role": "assistant", "content": response_text})
+
+    # Persist to file store
+    sessions.persist_session(session_id)
 
     # Push message.complete
     await emit("message.complete", {"text": response_text}, session_id)
@@ -296,4 +301,6 @@ def _session_info(session: Any) -> dict[str, Any]:
         "cwd": session.cwd,
         "title": session.title or f"Chat ({session.agent_type})",
         "message_count": len(session.history),
+        "backend_session_ref": getattr(session, "backend_session_ref", None),
+        "model": getattr(session, "model", None),
     }

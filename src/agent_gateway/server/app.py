@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from agent_gateway.server.agent_status import detect_agents, get_installed_agent_types
 from agent_gateway.server.dispatcher import Dispatcher
 from agent_gateway.server.session_manager import SessionManager
+from agent_gateway.server.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,8 @@ logger = logging.getLogger(__name__)
 def create_app(token: str) -> FastAPI:
     """Create and configure the FastAPI application."""
 
-    sessions = SessionManager()
+    store = SessionStore()
+    sessions = SessionManager(session_store=store)
     dispatcher = Dispatcher(sessions)
 
     @asynccontextmanager
@@ -124,45 +126,90 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/sessions")
     async def rest_sessions(request: Request) -> dict[str, Any]:
-        return {"sessions": [], "total": 0, "offset": 0}
+        params = dict(request.query_params)
+        limit = int(params.get("limit", 40))
+        offset = int(params.get("offset", 0))
+        min_messages = int(params.get("min_messages", 0))
+        archived = params.get("archived", "exclude")
+        order = params.get("order", "recent")
+        session_list, total = store.list_sessions(
+            limit=limit, offset=offset, min_messages=min_messages,
+            archived=archived, order=order,
+        )
+        return {
+            "sessions": [store.to_session_info(s) for s in session_list],
+            "total": total,
+            "offset": offset,
+        }
 
     @app.get("/api/sessions/search")
     async def rest_sessions_search(request: Request) -> dict[str, Any]:
-        return {"sessions": [], "total": 0}
+        q = request.query_params.get("q", "")
+        results = store.search(q) if q else []
+        return {"results": results}
 
     @app.post("/api/sessions")
     async def rest_sessions_create(request: Request) -> dict[str, Any]:
         body = await request.json() if await request.body() else {}
         s = await sessions.create_session(cwd=body.get("cwd"))
-        return {"session_id": s.session_id, "stored_session_id": None}
+        return {"session_id": s.session_id, "stored_session_id": s.session_id}
 
     @app.get("/api/sessions/{session_id}")
     async def rest_session_detail(session_id: str) -> dict[str, Any]:
+        # Check in-memory first, then persisted store
         s = sessions.get_session(session_id)
         if s:
-            return s.to_dict()
+            return store.to_session_info(store.get(session_id)) if store.get(session_id) else s.to_dict()
+        persisted = store.get(session_id)
+        if persisted:
+            return store.to_session_info(persisted)
         return {"id": session_id, "title": "Chat", "message_count": 0,
                 "created_at": 0, "archived": False}
 
     @app.patch("/api/sessions/{session_id}")
-    async def rest_session_update(session_id: str) -> dict[str, Any]:
+    async def rest_session_update(session_id: str, request: Request) -> dict[str, Any]:
+        body = {}
+        if await request.body():
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+        if body.get("archived") is True:
+            store.archive(session_id)
+        elif body.get("archived") is False:
+            store.unarchive(session_id)
+        if "title" in body:
+            store.update(session_id, title=body["title"])
         return {"ok": True}
 
     @app.delete("/api/sessions/{session_id}")
     async def rest_session_delete(session_id: str) -> dict[str, Any]:
+        store.delete(session_id)
+        # Also close in-memory session if active
+        if sessions.get_session(session_id):
+            await sessions.close_session(session_id)
         return {"ok": True}
 
     @app.get("/api/sessions/{session_id}/messages")
     async def rest_session_messages(session_id: str) -> dict[str, Any]:
         s = sessions.get_session(session_id)
-        return {"messages": s.history if s else []}
+        if s:
+            return {"messages": s.history, "session_id": session_id}
+        persisted = store.get(session_id)
+        if persisted:
+            return {"messages": persisted.history, "session_id": session_id}
+        return {"messages": [], "session_id": session_id}
 
     @app.post("/api/sessions/{session_id}/resume")
     async def rest_session_resume(session_id: str) -> dict[str, Any]:
-        s = sessions.get_session(session_id)
+        s = await sessions.resume_session(session_id)
         if s:
-            return {"session_id": s.session_id, "resumed": True,
-                    "messages": s.history}
+            return {
+                "session_id": s.session_id,
+                "stored_session_id": s.session_id,
+                "resumed": True,
+                "messages": s.history,
+            }
         return {"error": "not found"}
 
     @app.post("/api/sessions/{session_id}/branch")
@@ -183,7 +230,22 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/profiles/sessions")
     async def rest_profiles_sessions(request: Request) -> dict[str, Any]:
-        return {"sessions": [], "total": 0, "profile_totals": {}}
+        params = dict(request.query_params)
+        limit = int(params.get("limit", 40))
+        offset = int(params.get("offset", 0))
+        min_messages = int(params.get("min_messages", 0))
+        archived = params.get("archived", "exclude")
+        order = params.get("order", "recent")
+        session_list, total = store.list_sessions(
+            limit=limit, offset=offset, min_messages=min_messages,
+            archived=archived, order=order,
+        )
+        return {
+            "sessions": [store.to_session_info(s) for s in session_list],
+            "total": total,
+            "offset": offset,
+            "profile_totals": {"default": total},
+        }
 
     @app.post("/api/profiles")
     async def rest_profiles_create(request: Request) -> dict[str, Any]:

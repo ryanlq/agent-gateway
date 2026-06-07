@@ -69,6 +69,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        *,
+        session_ref: str | None = None,
     ) -> list[str]:
         """Build ``claude --print`` command arguments."""
         args = [self.command, "--print", "--output-format", "json"]
@@ -78,6 +80,10 @@ class ClaudeCodeBridge(CLIAgentBridge):
 
         # Limit agentic turns for gateway usage
         args.extend(["--max-turns", "1"])
+
+        # Pass session ref for CLI-level session continuity
+        if session_ref:
+            args.extend(["--session-id", session_ref])
 
         # Add any extra user-provided args
         args.extend(self.extra_args)
@@ -137,6 +143,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str = "",
+        session_ref: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream output using ``--output-format stream-json``.
 
@@ -149,6 +156,10 @@ class ClaudeCodeBridge(CLIAgentBridge):
             args.extend(["--model", self.model])
 
         args.extend(["--max-turns", "1"])
+
+        if session_ref:
+            args.extend(["--session-id", session_ref])
+
         args.extend(self.extra_args)
 
         prompt = self._format_prompt(message, history, system_extra)

@@ -66,6 +66,8 @@ class CodexBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        *,
+        session_ref: str | None = None,
     ) -> list[str]:
         """Build ``codex`` command arguments."""
         args = [self.command, "--quiet"]
@@ -75,6 +77,8 @@ class CodexBridge(CLIAgentBridge):
 
         if self.approval_mode:
             args.extend(["--approval-mode", self.approval_mode])
+
+        # Codex does not support session flags — session_ref is ignored.
 
         args.extend(self.extra_args)
 
@@ -94,9 +98,10 @@ class CodexBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str = "",
+        session_ref: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream output from codex, stripping ANSI codes per line."""
-        args = self._build_args(session_key, message, history, system_extra)
+        args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
         prompt = self._format_prompt(message, history, system_extra)
 
         async for line in self._run_subprocess_streaming(args, input_text=prompt):
