@@ -41,6 +41,7 @@ class CodexBridge(CLIAgentBridge):
         self,
         *,
         model: str | None = None,
+        approval_mode: str | None = None,
         timeout: float = 120.0,
         max_output_bytes: int = 2_000_000,
         extra_args: list[str] | None = None,
@@ -53,6 +54,7 @@ class CodexBridge(CLIAgentBridge):
         )
         super().__init__(config)
         self.model = model
+        self.approval_mode = approval_mode
         self.extra_args = extra_args or []
         self.command = command
 
@@ -70,6 +72,9 @@ class CodexBridge(CLIAgentBridge):
 
         if self.model:
             args.extend(["--model", self.model])
+
+        if self.approval_mode:
+            args.extend(["--approval-mode", self.approval_mode])
 
         args.extend(self.extra_args)
 

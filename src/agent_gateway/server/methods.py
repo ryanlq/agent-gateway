@@ -228,8 +228,9 @@ async def handle_config_set(
     if key == "agent" and isinstance(value, str):
         # Switch agent for a specific session
         session_id = params.get("session_id", "")
+        agent_params = params.get("agent_params")
         if session_id:
-            await sessions.set_agent(session_id, value)
+            await sessions.set_agent(session_id, value, agent_params=agent_params)
             return {"updated": True, "key": key, "value": value}
         sessions.default_agent_type = value
         return {"updated": True, "key": key, "value": value}

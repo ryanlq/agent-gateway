@@ -54,11 +54,12 @@ class SessionManager:
         self,
         agent_type: str | None = None,
         cwd: str | None = None,
+        agent_params: dict[str, Any] | None = None,
     ) -> DesktopSession:
-        """Create a new session with the given agent type."""
+        """Create a new session with the given agent type and parameters."""
         atype = agent_type or self.default_agent_type
         session_id = uuid.uuid4().hex[:16]
-        bridge = create_bridge(atype)
+        bridge = create_bridge(atype, **(agent_params or {}))
         session = DesktopSession(
             session_id=session_id,
             agent_type=atype,
@@ -66,7 +67,7 @@ class SessionManager:
             cwd=cwd,
         )
         self._sessions[session_id] = session
-        logger.info("Created session %s with agent %s", session_id, atype)
+        logger.info("Created session %s with agent %s (params=%s)", session_id, atype, agent_params)
         return session
 
     async def resume_session(self, session_id: str) -> DesktopSession | None:
@@ -110,7 +111,12 @@ class SessionManager:
         """Return all active sessions."""
         return list(self._sessions.values())
 
-    async def set_agent(self, session_id: str, agent_type: str) -> DesktopSession | None:
+    async def set_agent(
+        self,
+        session_id: str,
+        agent_type: str,
+        agent_params: dict[str, Any] | None = None,
+    ) -> DesktopSession | None:
         """Switch the agent type for an existing session."""
         session = self._sessions.get(session_id)
         if session is None:
@@ -122,8 +128,8 @@ class SessionManager:
             logger.warning("Timed out shutting down old bridge for session %s", session_id)
         except Exception as exc:
             logger.error("Error shutting down old bridge for session %s: %s", session_id, exc)
-        # Create new bridge
+        # Create new bridge with params
         session.agent_type = agent_type
-        session.bridge = create_bridge(agent_type)
-        logger.info("Switched session %s to agent %s", session_id, agent_type)
+        session.bridge = create_bridge(agent_type, **(agent_params or {}))
+        logger.info("Switched session %s to agent %s (params=%s)", session_id, agent_type, agent_params)
         return session
