@@ -295,7 +295,11 @@ async def handle_tools_list(
     emit: Any,
     sessions: SessionManager,
 ) -> dict[str, Any]:
-    """Return available toolsets (stub for Phase 1)."""
+    """Return available toolsets and skills for the active agent."""
+    from agent_gateway.server.skills_scanner import scan_skills
+
+    store = sessions._store
+    skills = scan_skills(sessions.default_agent_type, store) if store else []
     return {
         "toolsets": [
             {
@@ -306,6 +310,7 @@ async def handle_tools_list(
                 "tools": [],
             },
         ],
+        "skills": skills,
     }
 
 

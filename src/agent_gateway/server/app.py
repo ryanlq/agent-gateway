@@ -413,11 +413,14 @@ def create_app(token: str) -> FastAPI:
 
     @app.get("/api/skills")
     async def rest_skills(request: Request) -> list:
-        return []
+        from agent_gateway.server.skills_scanner import scan_skills
+        return scan_skills(sessions.default_agent_type, store)
 
     @app.put("/api/skills/toggle")
     async def rest_skills_toggle(request: Request) -> dict[str, Any]:
-        return {"ok": True, "name": "", "enabled": True}
+        from agent_gateway.server.skills_scanner import toggle_skill
+        body = await request.json() if await request.body() else {}
+        return toggle_skill(body.get("name", ""), body.get("enabled", True), store)
 
     @app.get("/api/tools/toolsets")
     async def rest_toolsets(request: Request) -> list:
