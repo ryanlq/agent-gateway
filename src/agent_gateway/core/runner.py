@@ -459,9 +459,12 @@ class GatewayRunner:
         if existing is None:
             # First message from this sender — create desktop session
             title = (user_input or "")[:60].split("\n")[0] or f"Email: {source.display_name}"
+            # Use the actual agent type, not "email" — the desktop client
+            # needs a valid agent_type to create a bridge when resuming.
+            agent_type = store.get_config("default_agent", "claude-code")
             store.create(
                 session_id=desktop_sid,
-                agent_type=source.platform,
+                agent_type=agent_type,
                 title=title,
             )
             history: list[dict[str, Any]] = []

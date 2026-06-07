@@ -82,6 +82,9 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     app = FastAPI(title="Agent Gateway", version="0.1.0", lifespan=lifespan)
 
+    # Expose store on app.state so the runner can share the same instance
+    app.state.desktop_store = store
+
     # Register RPC method handlers
     from agent_gateway.server import methods as m
     dispatcher.register("session.create", m.handle_session_create)
