@@ -291,6 +291,18 @@ class EmailAdapter(BasePlatformAdapter):
         # Skip attachments — configured via gateway.yaml or config dict
         self._skip_attachments = config.get("skip_attachments", False)
 
+        # Access control — config dict > env var
+        raw_allowed = config.get("allowed_users") or os.getenv("EMAIL_ALLOWED_USERS", "")
+        if isinstance(raw_allowed, list):
+            self._allowed_users: set[str] = {a.strip().lower() for a in raw_allowed if a.strip()}
+        elif isinstance(raw_allowed, str) and raw_allowed.strip():
+            self._allowed_users = {a.strip().lower() for a in raw_allowed.split(",") if a.strip()}
+        else:
+            self._allowed_users = set()
+
+        raw_allow_all = config.get("allow_all_users") or os.getenv("EMAIL_ALLOW_ALL_USERS", "")
+        self._allow_all_users = str(raw_allow_all).lower() in ("true", "1", "yes")
+
         self._media_cache = MediaCache()
 
         # Track message IDs we've already processed to avoid duplicates
@@ -476,11 +488,9 @@ class EmailAdapter(BasePlatformAdapter):
             logger.debug("[Email] Dropping automated sender at dispatch: %s", sender_addr)
             return
 
-        # Skip senders not in EMAIL_ALLOWED_USERS
-        allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()
-        if allowed_raw:
-            allowed = {addr.strip().lower() for addr in allowed_raw.split(",") if addr.strip()}
-            if sender_addr.lower() not in allowed:
+        # Skip senders not in allowed_users (unless allow_all_users is set)
+        if not self._allow_all_users and self._allowed_users:
+            if sender_addr.lower() not in self._allowed_users:
                 logger.debug("[Email] Dropping non-allowlisted sender at dispatch: %s", sender_addr)
                 return
 
