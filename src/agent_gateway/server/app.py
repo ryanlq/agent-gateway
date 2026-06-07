@@ -66,6 +66,8 @@ def create_app(token: str) -> FastAPI:
     dispatcher.register("config.get", m.handle_config_get)
     dispatcher.register("config.set", m.handle_config_set)
     dispatcher.register("tools.list", m.handle_tools_list)
+    dispatcher.register("setup.status", m.handle_setup_status)
+    dispatcher.register("setup.runtime_check", m.handle_setup_runtime_check)
 
     # ------------------------------------------------------------------
     # HTTP endpoints

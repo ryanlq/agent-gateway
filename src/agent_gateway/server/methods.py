@@ -239,6 +239,28 @@ async def handle_config_set(
 
 
 # ---------------------------------------------------------------------------
+# Setup / readiness (agent-gateway mode: always ready, no provider needed)
+# ---------------------------------------------------------------------------
+
+async def handle_setup_status(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Report provider setup status. Agent-gateway uses local CLIs — always configured."""
+    return {"provider_configured": True}
+
+
+async def handle_setup_runtime_check(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Runtime readiness check. Agent-gateway is always ready."""
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
