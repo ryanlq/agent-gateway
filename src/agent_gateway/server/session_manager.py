@@ -87,7 +87,7 @@ class SessionManager:
         """
         atype = agent_type or self.default_agent_type
         sid = session_id or uuid.uuid4().hex[:16]
-        ref = backend_session_ref or uuid.uuid4().hex
+        ref = backend_session_ref or str(uuid.uuid4())
         bridge = create_bridge(atype, **(agent_params or {}))
         ws_name = os.path.basename(cwd) if cwd else None
         session = DesktopSession(

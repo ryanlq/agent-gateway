@@ -129,7 +129,7 @@ class SessionStore:
         title: str | None = None,
     ) -> PersistedSession:
         """Create a new persisted session and write to disk."""
-        ref = backend_session_ref or uuid.uuid4().hex
+        ref = backend_session_ref or str(uuid.uuid4())
         ws_name = os.path.basename(workspace) if workspace else None
         session = PersistedSession(
             session_id=session_id,

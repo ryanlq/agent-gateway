@@ -95,14 +95,13 @@ class PiAgentBridge(CLIAgentBridge):
         """Build CLI args based on mode."""
         if self.mode == "print":
             args = [self.command, "--print"]
-            if session_ref:
-                args.extend(["--session", session_ref])
+            # NOTE: Pi's --session flag only works for resuming existing sessions,
+            # not for creating new ones. Skip it for now — session continuity is
+            # handled at the gateway level via history replay.
             args.extend(self.extra_args)
             return args
         elif self.mode == "json":
             args = [self.command, "--mode", "json"]
-            if session_ref:
-                args.extend(["--session", session_ref])
             args.extend(self.extra_args)
             return args
         else:  # rpc
@@ -218,8 +217,6 @@ class PiAgentBridge(CLIAgentBridge):
     ) -> AsyncIterator[str]:
         """Stream using ``pi --mode json``, parsing JSONL events."""
         args = [self.command, "--mode", "json"]
-        if session_ref:
-            args.extend(["--session", session_ref])
         args.extend(self.extra_args)
         prompt = self._format_prompt(message, history, system_extra)
 
