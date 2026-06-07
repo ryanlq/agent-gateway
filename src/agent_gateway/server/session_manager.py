@@ -66,8 +66,23 @@ class SessionManager:
         session_store: SessionStore | None = None,
     ) -> None:
         self._sessions: dict[str, DesktopSession] = {}
-        self.default_agent_type = default_agent_type
         self._store = session_store
+        # Restore persisted default agent if available
+        if self._store:
+            persisted = self._store.get_config("default_agent")
+            if persisted:
+                default_agent_type = persisted
+        self.default_agent_type = default_agent_type
+
+    @property
+    def default_agent_type(self) -> str:
+        return self._default_agent_type
+
+    @default_agent_type.setter
+    def default_agent_type(self, value: str) -> None:
+        self._default_agent_type = value
+        if self._store:
+            self._store.set_config("default_agent", value)
 
     async def create_session(
         self,

@@ -65,6 +65,9 @@ class SessionStore:
         self._file = self._dir / "sessions.json"
         self._lock = asyncio.Lock()
         self._data: dict[str, dict[str, Any]] = self._load()
+        # Gateway-level config (default_agent, etc.)
+        self._config_file = self._dir / "gateway-config.json"
+        self._config: dict[str, Any] = self._load_config()
 
     # -- File I/O ---------------------------------------------------------------
 
@@ -291,6 +294,48 @@ class SessionStore:
                 if len(results) >= limit:
                     break
         return results
+
+    # -- Gateway config (default_agent, etc.) ----------------------------------
+
+    def _load_config(self) -> dict[str, Any]:
+        """Read gateway-config.json. Returns empty dict on missing/corrupt."""
+        if not self._config_file.exists():
+            return {}
+        try:
+            raw = self._config_file.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_config(self) -> None:
+        """Write gateway-config.json atomically."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(self._config, ensure_ascii=False, indent=2)
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._dir), prefix=".gateway-config-", suffix=".json.tmp"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(self._config_file))
+        except OSError as exc:
+            logger.error("Failed to save gateway config: %s", exc)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        """Read a config value."""
+        return self._config.get(key, default)
+
+    def set_config(self, key: str, value: Any) -> None:
+        """Write a config value and persist."""
+        self._config[key] = value
+        self._save_config()
 
     # -- Async wrappers (for use from async handlers with lock) ------------------
 

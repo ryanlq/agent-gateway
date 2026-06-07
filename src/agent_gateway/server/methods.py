@@ -324,4 +324,6 @@ def _session_info(session: Any) -> dict[str, Any]:
         "message_count": len(session.history),
         "backend_session_ref": getattr(session, "backend_session_ref", None),
         "model": getattr(session, "model", None),
+        "desktop_contract": 1,
+        "running": True,
     }
