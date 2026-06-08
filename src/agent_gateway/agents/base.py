@@ -507,32 +507,55 @@ class CLIAgentBridge(ABC):
         *,
         timeout: float | None = None,
     ) -> AsyncIterator[str]:
-        """Execute a subprocess, yielding stdout lines as they arrive."""
+        """Execute a subprocess with a pseudo-terminal, yielding stdout lines
+        as they arrive.
+
+        Uses a pty (pseudo-terminal) instead of a plain pipe so the child
+        process uses line-buffering instead of full-buffering.  This is
+        essential for streaming: most CLI tools buffer output when they detect
+        a pipe, but flush after each line when connected to a tty.
+        """
+        import pty as _pty
+
         effective_timeout = timeout or self.config.timeout
 
         env = dict(os.environ)
         if self.config.env:
             env.update(self.config.env)
 
-        self._logger.debug("Streaming: %s", " ".join(args))
+        self._logger.debug("Streaming (pty): %s", " ".join(args))
+
+        # Create a pty pair — child gets the slave end (thinks it's a tty),
+        # we read from the master end.
+        master_fd, slave_fd = _pty.openpty()
 
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=slave_fd,
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=self.config.cwd,
         )
+        # Close our copy of the slave fd — the child has it now.
+        os.close(slave_fd)
 
         # Write input and close stdin so the process knows we're done sending
         if input_text and proc.stdin:
             proc.stdin.write(input_text.encode())
             proc.stdin.close()
 
+        # Wrap master_fd in an asyncio stream reader so we can async-iterate.
+        loop = asyncio.get_event_loop()
+        reader = asyncio.StreamReader()
+        transport, _ = await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader),
+            os.fdopen(master_fd, "rb"),
+        )
+
         total_bytes = 0
         try:
-            async for raw_line in proc.stdout:
+            async for raw_line in reader:
                 total_bytes += len(raw_line)
                 if total_bytes > self.config.max_output_bytes:
                     self._logger.warning("Streaming output exceeded %d bytes, killing process", self.config.max_output_bytes)
@@ -549,6 +572,7 @@ class CLIAgentBridge(ABC):
             proc.kill()
             raise
         finally:
+            transport.close()
             # Always reap the process to prevent zombie processes
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)

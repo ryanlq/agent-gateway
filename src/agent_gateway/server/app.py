@@ -137,9 +137,10 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         body = await request.json() if await request.body() else {}
         agent_type = body.get("agent", "")
         session_id = body.get("session_id")
+        agent_params = body.get("agent_params")
 
         if session_id:
-            await sessions.set_agent(session_id, agent_type)
+            await sessions.set_agent(session_id, agent_type, agent_params=agent_params)
         else:
             sessions.default_agent_type = agent_type
 
@@ -625,6 +626,11 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         # Send gateway.ready immediately
         await emit("gateway.ready", {"server": "agent-gateway", "version": "0.1.0"})
 
+        # Wire runner's desktop_emit so platform messages (email, etc.)
+        # also push streaming events to the desktop client.
+        if runner:
+            runner.desktop_emit = emit
+
         # Message loop
         try:
             while True:
@@ -651,6 +657,9 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         except Exception as exc:
             logger.error("WebSocket error: %s", exc)
         finally:
+            # Unwire runner's desktop_emit
+            if runner:
+                runner.desktop_emit = None
             # Cleanup sessions on disconnect
             await sessions.close_all()
 

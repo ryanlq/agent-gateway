@@ -31,7 +31,7 @@ import hashlib
 import logging
 import time
 import signal
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
 from agent_gateway.core.adapter import BasePlatformAdapter
 from agent_gateway.core.config import GatewayConfig
@@ -80,6 +80,9 @@ class GatewayRunner:
         self.agent = agent
         self._agent_callback = agent_callback
         self._desktop_store = desktop_store
+        # Optional callback to push streaming events to the desktop WebSocket.
+        # Signature: async (event_type: str, payload: dict, session_id: str) -> None
+        self.desktop_emit: Any = None
 
         # Runtime state
         self.adapters: dict[str, BasePlatformAdapter] = {}
@@ -257,7 +260,11 @@ class GatewayRunner:
         user_input: str,
         context_extra: str,
     ) -> Optional[str]:
-        """Call the agent with streaming response delivery."""
+        """Call the agent with streaming response delivery.
+
+        Streams to both the platform adapter (via StreamConsumer) and the
+        desktop client (via ``self.desktop_emit`` if set).
+        """
         source = event.source
         if not source:
             return None
@@ -266,7 +273,7 @@ class GatewayRunner:
         if not adapter:
             return await self._call_agent(event, session, user_input, context_extra)
 
-        # Create stream consumer
+        # Create stream consumer for the platform adapter
         stream_config = StreamConsumerConfig(
             min_edit_interval=self.config.streaming.min_edit_interval,
             use_draft=self.config.streaming.use_draft,
@@ -278,34 +285,109 @@ class GatewayRunner:
             reply_to=event.reply_to_message_id,
         )
 
-        # Check if agent supports streaming
-        if hasattr(self.agent, "stream"):
-            full_text = ""
-            try:
-                async for chunk in self.agent.stream(
+        # Determine the session ID for desktop events (if applicable)
+        desktop_sid: str | None = None
+        if self._desktop_store:
+            raw = event.raw_message or {}
+            in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
+            sender = source.user_id.replace("@", "-").replace(".", "-")
+            subject = str(raw.get("subject", "")).strip()
+            # Try to find existing session via In-Reply-To
+            if in_reply_to:
+                parent = self._desktop_store.find_by_email_message_id(in_reply_to)
+                if parent:
+                    desktop_sid = parent.session_id
+            if not desktop_sid:
+                if subject:
+                    subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
+                    desktop_sid = f"email-{sender}-{subject_hash}"
+                else:
+                    desktop_sid = f"email-{sender}"
+                existing = self._desktop_store.get(desktop_sid)
+                if not existing:
+                    desktop_sid = None  # Will be created in _sync_to_desktop later
+
+        # Notify desktop: stream starting
+        if desktop_sid and self.desktop_emit:
+            await self.desktop_emit("message.start", {}, desktop_sid)
+
+        # Obtain an async iterator of text chunks from the agent
+        full_text = ""
+        try:
+            if self.agent and hasattr(self.agent, "stream"):
+                # Direct agent object with stream() method
+                chunk_iter = self.agent.stream(
                     session_key=session.key,
                     message=user_input,
                     history=session.history,
                     system_extra=context_extra,
-                ):
-                    if isinstance(chunk, str):
-                        full_text += chunk
-                        consumer.on_delta(chunk)
-                    elif hasattr(chunk, "tool_name"):
-                        await consumer.on_tool_call(
-                            chunk.tool_name,
-                            getattr(chunk, "preview", ""),
-                            getattr(chunk, "args", None),
-                        )
+                )
+            else:
+                # Use the dynamic bridge (same logic as make_agent_callback)
+                chunk_iter = self._stream_via_bridge(
+                    session.key, user_input, session.history, context_extra,
+                )
 
-                result = await consumer.finish(full_text)
-                return full_text
-            except Exception as exc:
-                await consumer.finish(f"⚠️ Stream error: {exc}")
-                raise
+            async for chunk in chunk_iter:
+                if isinstance(chunk, str):
+                    full_text += chunk
+                    consumer.on_delta(chunk)
+                    # Push delta to desktop
+                    if desktop_sid and self.desktop_emit:
+                        await self.desktop_emit("message.delta", {"text": chunk}, desktop_sid)
+                elif hasattr(chunk, "tool_name"):
+                    await consumer.on_tool_call(
+                        chunk.tool_name,
+                        getattr(chunk, "preview", ""),
+                        getattr(chunk, "args", None),
+                    )
+
+            result = await consumer.finish(full_text)
+
+            # Notify desktop: stream complete
+            if desktop_sid and self.desktop_emit:
+                await self.desktop_emit("message.complete", {"text": full_text}, desktop_sid)
+
+            return full_text
+        except Exception as exc:
+            await consumer.finish(f"⚠️ Stream error: {exc}")
+            if desktop_sid and self.desktop_emit:
+                await self.desktop_emit("message.complete", {"text": full_text}, desktop_sid)
+            raise
+
+    async def _stream_via_bridge(
+        self,
+        session_key: str,
+        message: str,
+        history: list[dict[str, Any]],
+        system_extra: str,
+    ) -> AsyncIterator[str]:
+        """Create a bridge on-the-fly and stream from it.
+
+        Reads the current ``default_agent`` from the desktop store config
+        so agent switching takes effect immediately.
+        """
+        from agent_gateway.server.agent_factory import create_bridge
+
+        if self._desktop_store:
+            agent_type = self._desktop_store.get_config("default_agent", "claude-code")
         else:
-            # Agent doesn't support streaming — fall back to non-streaming
-            return await self._call_agent(event, session, user_input, context_extra)
+            agent_type = "claude-code"
+
+        bridge = create_bridge(agent_type)
+        try:
+            async for chunk in bridge.stream(
+                session_key=session_key,
+                message=message,
+                history=history,
+                system_extra=system_extra,
+            ):
+                yield chunk
+        finally:
+            try:
+                await asyncio.wait_for(bridge.shutdown(), timeout=5.0)
+            except Exception:
+                pass
 
     async def _invoke_agent(
         self,

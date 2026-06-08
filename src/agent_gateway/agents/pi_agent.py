@@ -57,7 +57,7 @@ class PiAgentBridge(CLIAgentBridge):
         self,
         *,
         command: str = "pi",
-        mode: str = "print",
+        mode: str = "rpc",
         timeout: float = 120.0,
         max_output_bytes: int = 2_000_000,
         idle_timeout: float = 300.0,
