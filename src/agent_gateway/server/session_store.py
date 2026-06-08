@@ -44,6 +44,7 @@ class PersistedSession:
     message_count: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
     preview: str | None = None
+    _email_msg_ids: list[str] = field(default_factory=list)
 
 
 class SessionStore:
@@ -240,6 +241,23 @@ class SessionStore:
                     title = content.strip()[:80]
                     self.update(session_id, title=title)
                     return title
+        return None
+
+    # -- Email threading --------------------------------------------------------
+
+    def find_by_email_message_id(self, message_id: str) -> PersistedSession | None:
+        """Look up a session that contains the given RFC-2822 Message-ID.
+
+        Sessions store a ``_email_msg_ids`` list in their metadata for this
+        purpose.  Returns ``None`` if no match is found.
+        """
+        target = message_id.strip()
+        if not target:
+            return None
+        for raw in self._data.values():
+            msg_ids = raw.get("_email_msg_ids") or []
+            if target in msg_ids:
+                return PersistedSession(**raw)
         return None
 
     # -- Conversion -------------------------------------------------------------

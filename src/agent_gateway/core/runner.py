@@ -27,8 +27,8 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
-import re
 import time
 import signal
 from typing import Any, Awaitable, Callable, Optional, Union
@@ -44,6 +44,7 @@ from agent_gateway.core.message import (
 )
 from agent_gateway.core.registry import registry
 from agent_gateway.core.session import Session, SessionStore, build_session_context_prompt
+from agent_gateway.server.session_store import PersistedSession as DesktopSession
 from agent_gateway.core.stream import StreamConsumer, StreamConsumerConfig
 
 logger = logging.getLogger(__name__)
@@ -452,26 +453,38 @@ class GatewayRunner:
         if store is None:
             return
 
-        # Deterministic session ID: same sender + same subject thread → same session.
-        # Strip Re:/Fwd:/Fw: prefixes so replies thread into the original session.
+        # --- Session routing strategy ---
+        # 1. If the email has an In-Reply-To header, find the session that
+        #    contains the parent message and append there.
+        # 2. Otherwise, derive a deterministic session ID from sender + subject
+        #    so new topics get their own session.
         raw = event.raw_message or {}
+        email_message_id = raw.get("message_id") or event.message_id
+        in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
         subject = str(raw.get("subject", "")).strip()
-        # Normalize threading prefixes (Re:, Fwd:, Fw:, multiple levels)
-        thread_subject = re.sub(
-            r"^(Re|Fwd|Fw)\s*:\s*", "", subject, flags=re.IGNORECASE
-        ).strip()
         sender = source.user_id.replace("@", "-").replace(".", "-")
-        if thread_subject:
-            slug = re.sub(r"[^a-zA-Z0-9]+", "-", thread_subject).strip("-")[:40]
-            desktop_sid = f"email-{sender}-{slug}"
-        else:
-            desktop_sid = f"email-{sender}"
 
-        existing = store.get(desktop_sid)
+        desktop_sid: str | None = None
+        existing: DesktopSession | None = None
+
+        # Strategy 1: In-Reply-To → thread into parent session
+        if in_reply_to:
+            parent = store.find_by_email_message_id(in_reply_to)
+            if parent is not None:
+                desktop_sid = parent.session_id
+                existing = parent
+
+        # Strategy 2: subject-based deterministic session ID
+        if desktop_sid is None:
+            # Use an 8-char hash of the subject — works for any language
+            subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
+            desktop_sid = f"email-{sender}-{subject_hash}" if subject else f"email-{sender}"
+            existing = store.get(desktop_sid)
+
         if existing is None:
             # First message in this thread — create desktop session
             title = (
-                thread_subject
+                subject
                 or (user_input or "")[:60].split("\n")[0]
                 or f"Email: {source.display_name}"
             )
@@ -494,10 +507,17 @@ class GatewayRunner:
 
         # Persist
         store.update_history(desktop_sid, history)
-        store.update(
-            desktop_sid,
-            last_active=time.time(),
-        )
+
+        # Track email Message-ID → session mapping for In-Reply-To threading
+        update_fields: dict[str, Any] = {"last_active": time.time()}
+        if email_message_id:
+            msg_ids: list[str] = list(
+                (existing._email_msg_ids if existing else None) or []
+            )
+            if email_message_id not in msg_ids:
+                msg_ids.append(email_message_id)
+            update_fields["_email_msg_ids"] = msg_ids
+        store.update(desktop_sid, **update_fields)
         logger.debug("Synced %d messages to desktop session %s", len(history), desktop_sid)
 
     def _process_media(self, event: MessageEvent) -> Optional[str]:
