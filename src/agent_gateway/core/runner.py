@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import signal
 from typing import Any, Awaitable, Callable, Optional, Union
@@ -451,14 +452,29 @@ class GatewayRunner:
         if store is None:
             return
 
-        # Deterministic session ID: same sender → same desktop session
+        # Deterministic session ID: same sender + same subject thread → same session.
+        # Strip Re:/Fwd:/Fw: prefixes so replies thread into the original session.
+        raw = event.raw_message or {}
+        subject = str(raw.get("subject", "")).strip()
+        # Normalize threading prefixes (Re:, Fwd:, Fw:, multiple levels)
+        thread_subject = re.sub(
+            r"^(Re|Fwd|Fw)\s*:\s*", "", subject, flags=re.IGNORECASE
+        ).strip()
         sender = source.user_id.replace("@", "-").replace(".", "-")
-        desktop_sid = f"email-{sender}"
+        if thread_subject:
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", thread_subject).strip("-")[:40]
+            desktop_sid = f"email-{sender}-{slug}"
+        else:
+            desktop_sid = f"email-{sender}"
 
         existing = store.get(desktop_sid)
         if existing is None:
-            # First message from this sender — create desktop session
-            title = (user_input or "")[:60].split("\n")[0] or f"Email: {source.display_name}"
+            # First message in this thread — create desktop session
+            title = (
+                thread_subject
+                or (user_input or "")[:60].split("\n")[0]
+                or f"Email: {source.display_name}"
+            )
             # Use the actual agent type, not "email" — the desktop client
             # needs a valid agent_type to create a bridge when resuming.
             agent_type = store.get_config("default_agent", "claude-code")

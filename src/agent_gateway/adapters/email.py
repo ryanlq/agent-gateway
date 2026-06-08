@@ -540,6 +540,8 @@ class EmailAdapter(BasePlatformAdapter):
             media_urls=media_urls,
             media_types=media_types,
             reply_to_message_id=msg_data["in_reply_to"] or None,
+            # Pass email metadata for session routing in the runner
+            raw_message={"subject": subject, "sender": sender_addr},
         )
 
         logger.info("[Email] New message from %s: %s", sender_addr, subject)
