@@ -91,6 +91,8 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     dispatcher.register("session.resume", m.handle_session_resume)
     dispatcher.register("session.close", m.handle_session_close)
     dispatcher.register("session.list", m.handle_session_list)
+    dispatcher.register("session.interrupt", m.handle_session_interrupt)
+    dispatcher.register("session.steer", m.handle_session_steer)
     dispatcher.register("prompt.submit", m.handle_prompt_submit)
     dispatcher.register("model.options", m.handle_model_options)
     dispatcher.register("commands.catalog", m.handle_commands_catalog)

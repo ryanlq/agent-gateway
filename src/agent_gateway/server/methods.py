@@ -21,6 +21,9 @@ from agent_gateway.server.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
+# Track running prompt tasks per session so session.interrupt can cancel them.
+_running_prompts: dict[str, asyncio.Task] = {}
+
 
 # ---------------------------------------------------------------------------
 # Session methods
@@ -85,6 +88,38 @@ async def handle_session_list(
     }
 
 
+async def handle_session_interrupt(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Interrupt a running prompt in a session.
+
+    Cancels the background streaming task which in turn kills the subprocess
+    (handled by ``_run_subprocess_streaming``'s ``CancelledError`` branch).
+    """
+    session_id = params.get("session_id", "")
+    task = _running_prompts.get(session_id)
+    if task is not None and not task.done():
+        task.cancel()
+        logger.info("Interrupted session %s", session_id)
+        return {"status": "interrupted", "session_id": session_id}
+    return {"status": "idle", "session_id": session_id}
+
+
+async def handle_session_steer(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Steer a live turn by appending text to the next tool result.
+
+    The CLI bridge doesn't expose a live tool window, so steering is not
+    supported — the frontend falls back to queueing the text for the next turn.
+    """
+    return {"status": "rejected"}
+
+
 # ---------------------------------------------------------------------------
 # Prompt / chat
 # ---------------------------------------------------------------------------
@@ -118,9 +153,15 @@ async def handle_prompt_submit(
         session_id = session.session_id
 
     # Fire-and-forget: run the actual streaming in a background task
-    asyncio.create_task(
+    task = asyncio.create_task(
         _run_prompt(session_id, text, session, emit, sessions),
     )
+    _running_prompts[session_id] = task
+
+    def _cleanup(t: asyncio.Task, sid: str = session_id) -> None:
+        _running_prompts.pop(sid, None)
+
+    task.add_done_callback(_cleanup)
 
     # Return immediately — events will arrive asynchronously
     return {"status": "ok"}
@@ -154,6 +195,16 @@ async def _run_prompt(
         error_msg = str(exc)
         full_text.append(f"\n\n⚠️ Agent error: {error_msg}")
         await emit("message.delta", {"text": error_msg}, session_id)
+
+    except asyncio.CancelledError:
+        logger.info("Prompt task cancelled for session %s", session_id)
+        response_text = "".join(full_text)
+        if response_text:
+            session.history.append({"role": "user", "content": text})
+            session.history.append({"role": "assistant", "content": response_text})
+            sessions.persist_session(session_id)
+        await emit("message.complete", {"text": response_text}, session_id)
+        raise
 
     except Exception as exc:
         logger.exception("Unexpected error in prompt.submit")
