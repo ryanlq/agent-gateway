@@ -4,12 +4,12 @@ Pi Agent CLI bridge.
 Wraps the Pi Agent CLI into the gateway's agent interface.  Supports three
 modes controlled by ``mode`` parameter:
 
-  - ``"print"`` (default) — Uses ``pi --print`` for simple text-in/text-out.
-    Stateless per invocation, reliable.
-  - ``"json"`` — Uses ``pi --mode json`` for structured JSONL streaming.
-    Parses ``text_delta`` events for incremental output.
+  - ``"json"`` (default) — Uses ``pi --mode json --print`` for structured
+    JSONL streaming with ``text_delta`` events.  Best for real-time streaming.
+  - ``"print"`` — Uses ``pi --print`` for simple text-in/text-out.
+    Stateless per invocation, no streaming deltas.
   - ``"rpc"`` — Uses ``pi --mode rpc`` for stateful JSON-RPC sessions.
-    Persistent per-session subprocess via ``SubprocessPool``.
+    Experimental — protocol compatibility may vary across pi versions.
 
 Requirements::
 
@@ -42,14 +42,13 @@ class PiAgentBridge(CLIAgentBridge):
 
     Usage::
 
-        # Default: simple --print mode
+        # Default: JSON streaming mode
         bridge = PiAgentBridge()
-        runner = GatewayRunner(config, agent=bridge)
 
-        # JSON streaming mode
-        bridge = PiAgentBridge(mode="json")
+        # Simple text mode (no streaming deltas)
+        bridge = PiAgentBridge(mode="print")
 
-        # RPC mode (stateful, per-session subprocesses)
+        # RPC mode (experimental, stateful per-session subprocesses)
         bridge = PiAgentBridge(mode="rpc", idle_timeout=300)
     """
 
@@ -57,7 +56,7 @@ class PiAgentBridge(CLIAgentBridge):
         self,
         *,
         command: str = "pi",
-        mode: str = "rpc",
+        mode: str = "json",
         timeout: float = 120.0,
         max_output_bytes: int = 2_000_000,
         idle_timeout: float = 300.0,
@@ -95,13 +94,11 @@ class PiAgentBridge(CLIAgentBridge):
         """Build CLI args based on mode."""
         if self.mode == "print":
             args = [self.command, "--print"]
-            # NOTE: Pi's --session flag only works for resuming existing sessions,
-            # not for creating new ones. Skip it for now — session continuity is
-            # handled at the gateway level via history replay.
             args.extend(self.extra_args)
             return args
         elif self.mode == "json":
-            args = [self.command, "--mode", "json"]
+            # --print is required for non-interactive mode with JSON output
+            args = [self.command, "--mode", "json", "--print"]
             args.extend(self.extra_args)
             return args
         else:  # rpc
@@ -215,8 +212,8 @@ class PiAgentBridge(CLIAgentBridge):
         system_extra: str,
         session_ref: str | None = None,
     ) -> AsyncIterator[str]:
-        """Stream using ``pi --mode json``, parsing JSONL events."""
-        args = [self.command, "--mode", "json"]
+        """Stream using ``pi --mode json --print``, parsing JSONL events."""
+        args = [self.command, "--mode", "json", "--print"]
         args.extend(self.extra_args)
         prompt = self._format_prompt(message, history, system_extra)
 

@@ -350,10 +350,14 @@ class GatewayRunner:
 
             return full_text
         except Exception as exc:
-            await consumer.finish(f"⚠️ Stream error: {exc}")
+            error_text = f"\n\n⚠️ Stream error: {exc}"
+            full_text += error_text
+            await consumer.finish(full_text)
             if desktop_sid and self.desktop_emit:
+                await self.desktop_emit("message.delta", {"text": error_text}, desktop_sid)
                 await self.desktop_emit("message.complete", {"text": full_text}, desktop_sid)
-            raise
+            # Don't raise — let _on_message complete normally with what we have
+            return full_text
 
     async def _stream_via_bridge(
         self,

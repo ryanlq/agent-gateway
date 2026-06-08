@@ -44,7 +44,7 @@ _AGENT_META: dict[str, dict[str, Any]] = {
                 "label": "Mode",
                 "type": "select",
                 "options": ["print", "json", "rpc"],
-                "default": "rpc",
+                "default": "json",
                 "description": "Pi agent communication mode.",
             },
         ],
