@@ -38,6 +38,16 @@ def _coerce_params(cls: type, kwargs: dict) -> dict:
         val = coerced[key]
         if ann_name == "bool" and isinstance(val, str):
             coerced[key] = val.lower() in ("true", "1", "yes")
+        elif ann_name == "int" and isinstance(val, str):
+            try:
+                coerced[key] = int(val)
+            except ValueError:
+                pass
+        elif ann_name == "float" and isinstance(val, str):
+            try:
+                coerced[key] = float(val)
+            except ValueError:
+                pass
     return coerced
 
 

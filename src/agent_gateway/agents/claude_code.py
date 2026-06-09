@@ -46,6 +46,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         self,
         *,
         model: str | None = None,
+        max_turns: int = 10,
         timeout: float = 120.0,
         max_output_bytes: int = 2_000_000,
         extra_args: list[str] | None = None,
@@ -60,6 +61,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         )
         super().__init__(config)
         self.model = model
+        self.max_turns = max_turns
         self.extra_args = extra_args or []
         self.command = command
         self.bare = bare
@@ -91,7 +93,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
             args.extend(["--model", self.model])
 
         # Allow enough turns for Claude to use tools (read files, etc.)
-        args.extend(["--max-turns", "10"])
+        args.extend(["--max-turns", str(self.max_turns)])
 
         # Pass session ref for CLI-level session continuity
         if session_ref:
@@ -174,7 +176,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         if self.model:
             args.extend(["--model", self.model])
 
-        args.extend(["--max-turns", "10"])
+        args.extend(["--max-turns", str(self.max_turns)])
 
         if session_ref:
             args.extend(["--session-id", session_ref])
