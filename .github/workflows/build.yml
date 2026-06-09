@@ -45,6 +45,7 @@ jobs:
       - name: Rename artifact
         run: |
           mv dist/agent-gateway${{ matrix.ext }} dist/${{ matrix.asset_name }}
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
