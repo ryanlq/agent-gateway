@@ -630,6 +630,14 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     async def rest_hermes_update(request: Request) -> dict[str, Any]:
         return {"ok": True, "updated": False}
 
+    @app.get("/api/providers/oauth")
+    async def rest_providers_oauth(request: Request) -> dict[str, Any]:
+        return {"providers": []}
+
+    @app.get("/api/audio/elevenlabs/voices")
+    async def rest_elevenlabs_voices(request: Request) -> dict[str, Any]:
+        return {"voices": []}
+
     # ------------------------------------------------------------------
     # WebSocket JSON-RPC endpoint
     # ------------------------------------------------------------------
