@@ -286,17 +286,12 @@ class PiAgentBridge(CLIAgentBridge):
                 if inner_type == "text_delta":
                     return ame.get("delta", "")
 
-        # message_end contains the final content
+        # message_end contains the complete message text which has already
+        # been yielded incrementally via text_delta events.  Skipping it
+        # avoids duplicating the response (and prevents user-question echo
+        # when Pi's message_end content includes the original prompt).
         if event_type == "message_end":
-            msg = data.get("message", {})
-            if isinstance(msg, dict):
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    texts = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            texts.append(block.get("text", ""))
-                    return "\n".join(texts)
+            return ""
 
         return ""
 
@@ -367,10 +362,12 @@ class PiAgentBridge(CLIAgentBridge):
                     except json.JSONDecodeError:
                         yield line
                         continue
-                    if resp.get("type") in ("done", "turn_end"):
+                    if resp.get("type") in ("done", "turn_end", "response"):
                         break
-                    text = resp.get("result", "") or resp.get("text", "") or resp.get("delta", "")
-                    if text:
+                    # Skip prompt echoes — Pi RPC may acknowledge the
+                    # submitted prompt by echoing it back in "text".
+                    text = resp.get("delta", "") or resp.get("result", "") or resp.get("text", "")
+                    if text and text != prompt:
                         yield text
             pp.touch()
         except Exception as exc:

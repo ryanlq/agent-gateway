@@ -540,6 +540,7 @@ class CLIAgentBridge(ABC):
         try:
             async for line in proc.stream():
                 if line.is_stderr:
+                    self._logger.debug("Agent stderr: %s", line.text[:200])
                     continue
                 total_bytes += len(line.text.encode())
                 if total_bytes > self.config.max_output_bytes:

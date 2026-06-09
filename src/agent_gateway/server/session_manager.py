@@ -276,7 +276,12 @@ class SessionManager:
             logger.warning("Timed out shutting down old bridge for session %s", session_id)
         except Exception as exc:
             logger.error("Error shutting down old bridge for session %s: %s", session_id, exc)
-        # Create new bridge with params
+        # Create new bridge with params — fall back to stored per-agent params
+        # when the caller (e.g. chat UI model picker) doesn't supply them.
+        if not agent_params and self._store:
+            all_params: dict[str, dict] = self._store.get_config("agent_params", {})
+            if isinstance(all_params, dict):
+                agent_params = all_params.get(agent_type)
         session.agent_type = agent_type
         session.bridge = create_bridge(agent_type, **(agent_params or {}))
         # Preserve cwd from session when switching agents

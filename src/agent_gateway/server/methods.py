@@ -43,9 +43,20 @@ async def handle_session_create(
             tc = hermes_cfg.get("terminal")
             if isinstance(tc, dict) and tc.get("cwd"):
                 cwd = tc["cwd"]
+
+    # Load stored per-agent params so model, bare, mode etc persist across
+    # new sessions (the frontend model picker doesn't send agent_params).
+    agent_type = params.get("agent_type") or sessions.default_agent_type
+    agent_params = params.get("agent_params")
+    if not agent_params and sessions._store:
+        all_params: dict = sessions._store.get_config("agent_params", {})
+        if isinstance(all_params, dict):
+            agent_params = all_params.get(agent_type)
+
     session = await sessions.create_session(
-        agent_type=params.get("agent_type"),
+        agent_type=agent_type,
         cwd=cwd,
+        agent_params=agent_params,
     )
     return {
         "session_id": session.session_id,
