@@ -62,6 +62,8 @@ class PiAgentBridge(CLIAgentBridge):
         idle_timeout: float = 300.0,
         max_concurrent: int = 10,
         extra_args: list[str] | None = None,
+        bare: bool = False,
+        reasoning: str | None = None,
     ) -> None:
         config = SubprocessConfig(
             command=[command],
@@ -74,11 +76,23 @@ class PiAgentBridge(CLIAgentBridge):
         self.command = command
         self.mode = mode
         self.extra_args = extra_args or []
+        self.bare = bare
+        self.reasoning = reasoning
         self._pool: SubprocessPool | None = None
 
         if mode == "rpc":
             config.command = [command, "--mode", "rpc"] + self.extra_args
             self._pool = SubprocessPool(config)
+
+    # -- Reasoning / thinking -----------------------------------------------
+
+    def _thinking_args(self) -> list[str]:
+        """Return ``--thinking`` flags when reasoning is configured."""
+        if self.reasoning:
+            # Pi uses 'off' instead of 'none'
+            mapped = "off" if self.reasoning == "none" else self.reasoning
+            return ["--thinking", mapped]
+        return []
 
     # -- CLIAgentBridge overrides ------------------------------------------
 
@@ -92,17 +106,31 @@ class PiAgentBridge(CLIAgentBridge):
         session_ref: str | None = None,
     ) -> list[str]:
         """Build CLI args based on mode."""
+        if self.mode == "rpc":
+            if self.bare:
+                logger.warning("Bare mode has no effect in RPC mode (stateful session)")
+            if self.reasoning:
+                logger.warning("Reasoning/thinking has no effect in RPC mode")
+            return self.config.command
+
         if self.mode == "print":
             args = [self.command, "--print"]
-            args.extend(self.extra_args)
-            return args
-        elif self.mode == "json":
+        else:
             # --print is required for non-interactive mode with JSON output
             args = [self.command, "--mode", "json", "--print"]
-            args.extend(self.extra_args)
-            return args
-        else:  # rpc
-            return self.config.command
+
+        # Reasoning effort / thinking level
+        args.extend(self._thinking_args())
+
+        # Bare mode: disable tools, extensions, skills, context, session persistence
+        if self.bare:
+            args.extend([
+                "--no-tools", "--no-extensions", "--no-skills",
+                "--no-prompt-templates", "--no-context-files", "--no-session",
+            ])
+
+        args.extend(self.extra_args)
+        return args
 
     async def _parse_output(self, raw_stdout: str, session_key: str) -> str:
         """Parse output based on mode."""
@@ -214,6 +242,17 @@ class PiAgentBridge(CLIAgentBridge):
     ) -> AsyncIterator[str]:
         """Stream using ``pi --mode json --print``, parsing JSONL events."""
         args = [self.command, "--mode", "json", "--print"]
+
+        # Reasoning effort / thinking level
+        args.extend(self._thinking_args())
+
+        # Bare mode: disable tools, extensions, skills, context, session persistence
+        if self.bare:
+            args.extend([
+                "--no-tools", "--no-extensions", "--no-skills",
+                "--no-prompt-templates", "--no-context-files", "--no-session",
+            ])
+
         args.extend(self.extra_args)
         prompt = self._format_prompt(message, history, system_extra)
 

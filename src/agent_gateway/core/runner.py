@@ -368,17 +368,26 @@ class GatewayRunner:
     ) -> AsyncIterator[str]:
         """Create a bridge on-the-fly and stream from it.
 
-        Reads the current ``default_agent`` from the desktop store config
-        so agent switching takes effect immediately.
+        Reads the current ``default_agent`` and ``default_agent_params``
+        from the desktop store config so agent switching takes effect
+        immediately.
         """
         from agent_gateway.server.agent_factory import create_bridge
 
         if self._desktop_store:
             agent_type = self._desktop_store.get_config("default_agent", "claude-code")
+            # Per-agent params: { "claude-code": {...}, "pi": {...} }
+            all_params: dict = self._desktop_store.get_config("agent_params") or {}
+            agent_params = all_params.get(agent_type, {}) if isinstance(all_params, dict) else {}
+            # Include global reasoning default if set
+            default_reasoning = self._desktop_store.get_config("default_reasoning")
+            if default_reasoning and "reasoning" not in agent_params:
+                agent_params["reasoning"] = default_reasoning
         else:
             agent_type = "claude-code"
+            agent_params = {}
 
-        bridge = create_bridge(agent_type)
+        bridge = create_bridge(agent_type, **agent_params)
         try:
             async for chunk in bridge.stream(
                 session_key=session_key,

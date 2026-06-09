@@ -128,9 +128,15 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     async def rest_agents_status(request: Request) -> dict[str, Any]:
         """Detect installed agent CLIs and return their status."""
         agents = detect_agents()
+        # Per-agent params: { "claude-code": { model: "..." }, "pi": { mode: "..." } }
+        all_params: dict[str, dict] = store.get_config("agent_params", {}) if store else {}
+        current = sessions.default_agent_type
         return {
             "agents": agents,
-            "current": sessions.default_agent_type,
+            "current": current,
+            "current_params": all_params.get(current, {}),
+            # Send ALL per-agent params so the frontend can restore every agent's settings
+            "all_params": all_params,
         }
 
     @app.post("/api/agents/switch")
@@ -145,6 +151,14 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
             await sessions.set_agent(session_id, agent_type, agent_params=agent_params)
         else:
             sessions.default_agent_type = agent_type
+            # Persist agent params per-agent so changing one agent's settings
+            # doesn't clobber another's.
+            if agent_params and store:
+                all_params: dict[str, dict] = store.get_config("agent_params", {})
+                if not isinstance(all_params, dict):
+                    all_params = {}
+                all_params[agent_type] = agent_params
+                store.set_config("agent_params", all_params)
 
         return {"ok": True, "agent": agent_type}
 
@@ -305,14 +319,16 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         return {"command": ""}
 
     # -- Config ------------------------------------------------------------
+    # Frontend config is stored under a single "hermes_config" key in
+    # gateway-config.json to isolate it from gateway-internal keys like
+    # "default_agent" and prevent nesting/leaking of "agents" arrays.
 
     @app.get("/api/config")
     async def rest_config(request: Request) -> dict[str, Any]:
         agents = detect_agents()
+        config = store.get_config("hermes_config", {}) if store else {}
         return {
-            "config": {
-                "default_agent": sessions.default_agent_type,
-            },
+            "config": config,
             "agents": agents,
         }
 
@@ -326,10 +342,26 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     @app.patch("/api/config")
     async def rest_config_set(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        if store and isinstance(body, dict):
+            # Merge into existing hermes_config, stripping non-config keys
+            clean = {k: v for k, v in body.items() if k not in ("agents", "current", "current_params")}
+            current = store.get_config("hermes_config", {})
+            if isinstance(current, dict):
+                current.update(clean)
+            else:
+                current = dict(clean)
+            store.set_config("hermes_config", current)
         return {"updated": True}
 
     @app.put("/api/config")
     async def rest_config_put(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        config = body.get("config", {})
+        if store and isinstance(config, dict):
+            # Strip non-config fields the frontend may echo back
+            clean = {k: v for k, v in config.items() if k not in ("agents", "current", "current_params")}
+            store.set_config("hermes_config", clean)
         return {"ok": True}
 
     # -- Model -------------------------------------------------------------
@@ -492,12 +524,19 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         if runner and runner.adapters:
             platforms = []
             for name, adapter in runner.adapters.items():
+                connected = adapter.is_connected
                 platforms.append({
                     "id": name,
                     "name": adapter.name,
-                    "enabled": adapter.is_connected,
-                    "configured": adapter.is_connected,
-                    "gateway_running": adapter.is_connected,
+                    "description": getattr(adapter, "description", adapter.name),
+                    "docs_url": getattr(adapter, "docs_url", ""),
+                    "enabled": connected,
+                    "configured": connected,
+                    "gateway_running": connected,
+                    "state": "connected" if connected else "disconnected",
+                    "env_vars": [],
+                    "error_message": adapter.fatal_error_message if adapter.has_fatal_error else None,
+                    "error_code": adapter.fatal_error_code if adapter.has_fatal_error else None,
                 })
             return {"platforms": platforms}
         return {"platforms": []}

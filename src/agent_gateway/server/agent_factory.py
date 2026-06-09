@@ -6,6 +6,7 @@ Creates the appropriate ``CLIAgentBridge`` subclass based on agent type.
 
 from __future__ import annotations
 
+import inspect
 import logging
 
 from agent_gateway.agents.base import CLIAgentBridge
@@ -20,6 +21,26 @@ _AGENT_REGISTRY: dict[str, str] = {
 }
 
 
+def _coerce_params(cls: type, kwargs: dict) -> dict:
+    """Coerce string param values to expected types based on constructor signature.
+
+    The UI sends all param values as strings (e.g. ``"true"``, ``"false"``),
+    but bridge constructors expect native Python types (e.g. ``bool``).
+    """
+    sig = inspect.signature(cls.__init__)
+    coerced = dict(kwargs)
+    for key, param in sig.parameters.items():
+        if key not in coerced:
+            continue
+        ann = param.annotation
+        # With ``from __future__ import annotations``, annotations are strings.
+        ann_name = ann if isinstance(ann, str) else getattr(ann, "__name__", "")
+        val = coerced[key]
+        if ann_name == "bool" and isinstance(val, str):
+            coerced[key] = val.lower() in ("true", "1", "yes")
+    return coerced
+
+
 def create_bridge(agent_type: str, **kwargs: object) -> CLIAgentBridge:
     """Create a bridge instance for the given agent type.
 
@@ -28,7 +49,7 @@ def create_bridge(agent_type: str, **kwargs: object) -> CLIAgentBridge:
     agent_type :
         One of ``"claude-code"``, ``"pi"``, ``"codex"``.
     **kwargs :
-        Forwarded to the bridge constructor.
+        Forwarded to the bridge constructor (with automatic type coercion).
 
     Returns
     -------
@@ -43,6 +64,7 @@ def create_bridge(agent_type: str, **kwargs: object) -> CLIAgentBridge:
     import importlib
     module = importlib.import_module(module_path)
     cls = getattr(module, class_name)
-    bridge = cls(**kwargs)
-    logger.info("Created %s bridge for agent type '%s'", class_name, agent_type)
+    coerced = _coerce_params(cls, kwargs)
+    bridge = cls(**coerced)
+    logger.info("Created %s bridge for agent type '%s' (params=%s)", class_name, agent_type, coerced)
     return bridge

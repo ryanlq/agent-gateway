@@ -45,6 +45,8 @@ class PersistedSession:
     history: list[dict[str, Any]] = field(default_factory=list)
     preview: str | None = None
     _email_msg_ids: list[str] = field(default_factory=list)
+    reasoning: str | None = None
+    fast: str | None = None
 
 
 class SessionStore:

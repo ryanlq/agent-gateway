@@ -50,6 +50,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
         max_output_bytes: int = 2_000_000,
         extra_args: list[str] | None = None,
         command: str = "claude",
+        bare: bool = False,
+        reasoning: str | None = None,
     ) -> None:
         config = SubprocessConfig(
             command=[command],
@@ -60,6 +62,16 @@ class ClaudeCodeBridge(CLIAgentBridge):
         self.model = model
         self.extra_args = extra_args or []
         self.command = command
+        self.bare = bare
+        self.reasoning = reasoning
+
+    # -- Reasoning effort ---------------------------------------------------
+
+    def _effort_args(self) -> list[str]:
+        """Return ``--effort`` flags when reasoning is configured."""
+        if self.reasoning and self.reasoning != "none":
+            return ["--effort", self.reasoning]
+        return []
 
     # -- CLIAgentBridge overrides ------------------------------------------
 
@@ -84,6 +96,13 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # Pass session ref for CLI-level session continuity
         if session_ref:
             args.extend(["--session-id", session_ref])
+
+        # Reasoning effort level
+        args.extend(self._effort_args())
+
+        # Bare mode: skip hooks, plugins, tools, CLAUDE.md auto-discovery
+        if self.bare:
+            args.extend(["--bare", "--disable-slash-commands", "--tools", ""])
 
         # Add any extra user-provided args
         args.extend(self.extra_args)
@@ -159,6 +178,13 @@ class ClaudeCodeBridge(CLIAgentBridge):
 
         if session_ref:
             args.extend(["--session-id", session_ref])
+
+        # Reasoning effort level
+        args.extend(self._effort_args())
+
+        # Bare mode: skip hooks, plugins, tools, CLAUDE.md auto-discovery
+        if self.bare:
+            args.extend(["--bare", "--disable-slash-commands", "--tools", ""])
 
         args.extend(self.extra_args)
 

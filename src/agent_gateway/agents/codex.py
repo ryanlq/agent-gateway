@@ -46,6 +46,8 @@ class CodexBridge(CLIAgentBridge):
         max_output_bytes: int = 2_000_000,
         extra_args: list[str] | None = None,
         command: str = "codex",
+        bare: bool = False,
+        reasoning: str | None = None,  # accepted but not used — Codex has no CLI flag
     ) -> None:
         config = SubprocessConfig(
             command=[command],
@@ -57,6 +59,7 @@ class CodexBridge(CLIAgentBridge):
         self.approval_mode = approval_mode
         self.extra_args = extra_args or []
         self.command = command
+        self.bare = bare
 
     # -- CLIAgentBridge overrides ------------------------------------------
 

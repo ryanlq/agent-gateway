@@ -312,6 +312,20 @@ async def handle_config_set(
         sessions.default_agent_type = value
         return {"updated": True, "key": key, "value": value}
 
+    if key == "reasoning" and isinstance(value, str):
+        session_id = params.get("session_id", "")
+        if session_id:
+            await sessions.set_reasoning_fast(session_id, reasoning=value)
+            return {"updated": True, "key": key, "value": value}
+        return {"updated": False, "message": "No session_id for reasoning config"}
+
+    if key == "fast" and isinstance(value, str):
+        session_id = params.get("session_id", "")
+        if session_id:
+            await sessions.set_reasoning_fast(session_id, fast=value)
+            return {"updated": True, "key": key, "value": value}
+        return {"updated": False, "message": "No session_id for fast config"}
+
     return {"updated": False, "message": f"Unknown config key: {key}"}
 
 
@@ -382,4 +396,6 @@ def _session_info(session: Any) -> dict[str, Any]:
         "model": getattr(session, "model", None),
         "desktop_contract": 1,
         "running": True,
+        "reasoning_effort": getattr(session, "reasoning", None),
+        "fast": getattr(session, "fast", None) == "fast",
     }

@@ -30,6 +30,13 @@ _AGENT_META: dict[str, dict[str, Any]] = {
                 "default": "claude-sonnet-4-6",
                 "description": "Claude model to use for responses.",
             },
+            {
+                "key": "bare",
+                "label": "Bare Mode",
+                "type": "toggle",
+                "default": "false",
+                "description": "极简模式：跳过工具、技能、上下文加载，节省 token。适合简单问答。",
+            },
         ],
     },
     "pi": {
@@ -47,6 +54,13 @@ _AGENT_META: dict[str, dict[str, Any]] = {
                 "default": "json",
                 "description": "Pi agent communication mode.",
             },
+            {
+                "key": "bare",
+                "label": "Bare Mode",
+                "type": "toggle",
+                "default": "false",
+                "description": "极简模式：跳过工具、技能、上下文加载，节省 token。适合简单问答。",
+            },
         ],
     },
     "codex": {
@@ -63,6 +77,13 @@ _AGENT_META: dict[str, dict[str, Any]] = {
                 "options": ["suggest", "auto-edit", "full-auto"],
                 "default": "suggest",
                 "description": "Codex approval mode for tool calls.",
+            },
+            {
+                "key": "bare",
+                "label": "Bare Mode",
+                "type": "toggle",
+                "default": "false",
+                "description": "极简模式：跳过工具、技能、上下文加载，节省 token。适合简单问答。",
             },
         ],
     },

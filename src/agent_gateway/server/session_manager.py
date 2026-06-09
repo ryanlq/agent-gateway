@@ -42,6 +42,8 @@ class DesktopSession:
     backend_session_ref: str | None = None
     status: str = "active"
     workspace_name: str | None = None
+    reasoning: str | None = None
+    fast: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +56,8 @@ class DesktopSession:
             "backend_session_ref": self.backend_session_ref,
             "status": self.status,
             "workspace_name": self.workspace_name,
+            "reasoning": self.reasoning,
+            "fast": self.fast,
         }
 
 
@@ -147,7 +151,15 @@ class SessionManager:
 
         # Re-create the in-memory session with the original IDs
         atype = persisted.agent_type
-        bridge = create_bridge(atype)
+
+        # Restore reasoning param for bridge construction
+        reasoning = getattr(persisted, "reasoning", None)
+        fast_val = getattr(persisted, "fast", None)
+        bridge_params: dict[str, Any] = {}
+        if reasoning:
+            bridge_params["reasoning"] = reasoning
+        bridge = create_bridge(atype, **bridge_params)
+
         session = DesktopSession(
             session_id=persisted.session_id,
             agent_type=atype,
@@ -159,6 +171,8 @@ class SessionManager:
             backend_session_ref=persisted.backend_session_ref,
             status=persisted.status,
             workspace_name=persisted.workspace_name,
+            reasoning=reasoning,
+            fast=fast_val,
         )
         self._sessions[persisted.session_id] = session
         logger.info(
@@ -231,6 +245,10 @@ class SessionManager:
             updates["title"] = s.title
         if preview:
             updates["preview"] = preview
+        if s.reasoning is not None:
+            updates["reasoning"] = s.reasoning
+        if s.fast is not None:
+            updates["fast"] = s.fast
         self._store.update(session_id, **updates)
         self._store.auto_title(session_id)
 
@@ -258,5 +276,57 @@ class SessionManager:
         # Create new bridge with params
         session.agent_type = agent_type
         session.bridge = create_bridge(agent_type, **(agent_params or {}))
+        # Persist agent params per-agent
+        if agent_params and self._store:
+            all_params: dict[str, dict] = self._store.get_config("agent_params", {})
+            if not isinstance(all_params, dict):
+                all_params = {}
+            all_params[agent_type] = agent_params
+            self._store.set_config("agent_params", all_params)
         logger.info("Switched session %s to agent %s (params=%s)", session_id, agent_type, agent_params)
+        return session
+
+    async def set_reasoning_fast(
+        self,
+        session_id: str,
+        *,
+        reasoning: str | None = None,
+        fast: str | None = None,
+    ) -> DesktopSession | None:
+        """Update reasoning effort and/or fast mode for a session.
+
+        Recreates the bridge because reasoning/thinking flags are baked into
+        CLI args at construction time.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+
+        # Update session fields
+        if reasoning is not None:
+            session.reasoning = reasoning
+        if fast is not None:
+            session.fast = fast
+
+        # Recreate bridge with updated reasoning param
+        try:
+            await asyncio.wait_for(session.bridge.shutdown(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out shutting down bridge for session %s", session_id)
+        except Exception as exc:
+            logger.error("Error shutting down bridge for session %s: %s", session_id, exc)
+
+        bridge_params: dict[str, Any] = {}
+        if session.reasoning:
+            bridge_params["reasoning"] = session.reasoning
+        session.bridge = create_bridge(session.agent_type, **bridge_params)
+
+        # Persist global reasoning default so runner's dynamic bridge picks it up
+        if reasoning is not None and self._store:
+            self._store.set_config("default_reasoning", reasoning)
+
+        logger.info(
+            "Updated session %s: reasoning=%s, fast=%s",
+            session_id, session.reasoning, session.fast,
+        )
         return session
