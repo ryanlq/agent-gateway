@@ -12,6 +12,7 @@ name = "agent-gateway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "procstream" },
     { name = "pyyaml" },
 ]
 
@@ -56,6 +57,7 @@ requires-dist = [
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3" },
     { name = "fastapi", marker = "extra == 'desktop'", specifier = ">=0.100" },
     { name = "fastapi", marker = "extra == 'webhook'", specifier = ">=0.100" },
+    { name = "procstream", specifier = ">=0.2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21" },
     { name = "python-telegram-bot", marker = "extra == 'telegram'", specifier = ">=21.0" },
@@ -657,6 +659,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "procstream"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/0d/9c35a57b1b5b081a3706817182383ef6e47545f2fe68f258ae1047117c3f/procstream-0.2.0.tar.gz", hash = "sha256:cd6692a5b04d4c339f99b0880e3e5315257c8f65aa57319eaff0b6bfc5ddaa2c", size = 15779, upload-time = "2026-04-18T06:13:38.072Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a6/47/fc3961fbaf1123ba070587001e84a10118edc973130cdc2c8b8e6fc40083/procstream-0.2.0-py3-none-any.whl", hash = "sha256:cf06bc5cb300fd9a3a947aa3e1408c10f811618f5f7bd0220f20b3674992151e", size = 15009, upload-time = "2026-04-18T06:13:36.599Z" },
 ]
 
 [[package]]
