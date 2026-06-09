@@ -12,7 +12,9 @@ Handlers return a result dict that gets wrapped in a JSON-RPC response.
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
+import os
 from typing import Any
 
 from agent_gateway.agents.base import CLIAgentError
@@ -396,6 +398,295 @@ async def handle_tools_list(
         ],
         "skills": skills,
     }
+
+
+# ---------------------------------------------------------------------------
+# Session title
+# ---------------------------------------------------------------------------
+
+async def handle_session_title(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Set the title for a session and persist it."""
+    session_id = params.get("session_id", "")
+    title = params.get("title", "")
+
+    session = sessions.get_session(session_id)
+    if session is None:
+        return {"title": None, "pending": True}
+
+    session.title = title
+    sessions.persist_session(session_id)
+
+    # Notify frontend of the updated session info
+    await emit("session.info", _session_info(session), session_id)
+
+    return {"title": title, "session_key": session_id}
+
+
+# ---------------------------------------------------------------------------
+# Slash command execution
+# ---------------------------------------------------------------------------
+
+# Built-in commands that don't need special handling
+_BUILTIN_COMMANDS = {
+    "new": "Create a new session",
+    "reset": "Reset current session history",
+    "agent": "Switch agent type: /agent <claude-code|pi|codex>",
+    "help": "Show available commands",
+}
+
+
+async def handle_slash_exec(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Execute a slash command.
+
+    Frontend sends: { session_id, command } where command has no leading ``/``.
+    """
+    session_id = params.get("session_id", "")
+    raw = params.get("command", "").strip()
+    # Strip any remaining leading slashes
+    command = raw.lstrip("/")
+
+    if not command:
+        return {"output": "No command specified."}
+
+    parts = command.split(None, 1)
+    cmd_name = parts[0].lower()
+    cmd_arg = parts[1] if len(parts) > 1 else ""
+
+    # -- /new ----------------------------------------------------------------
+    if cmd_name == "new":
+        new_session = await sessions.create_session()
+        await emit(
+            "session.info",
+            _session_info(new_session),
+            new_session.session_id,
+        )
+        return {
+            "output": f"Created new session {new_session.session_id}",
+        }
+
+    # -- /reset --------------------------------------------------------------
+    if cmd_name == "reset":
+        session = sessions.get_session(session_id)
+        if session:
+            session.history.clear()
+            sessions.persist_session(session_id)
+            return {"output": "Session history cleared."}
+        return {"warning": "No active session to reset."}
+
+    # -- /agent <type> -------------------------------------------------------
+    if cmd_name == "agent":
+        if not cmd_arg:
+            agents = detect_agents()
+            names = ", ".join(a["slug"] for a in agents)
+            return {"output": f"Available agents: {names}\nUsage: /agent <type>"}
+        agent_type = cmd_arg.strip().lower()
+        agents = detect_agents()
+        valid = {a["slug"] for a in agents}
+        if agent_type not in valid:
+            return {"warning": f"Unknown agent '{agent_type}'. Available: {', '.join(sorted(valid))}"}
+        if session_id:
+            await sessions.set_agent(session_id, agent_type)
+            session = sessions.get_session(session_id)
+            if session:
+                await emit("session.info", _session_info(session), session_id)
+            return {"output": f"Switched to {agent_type}."}
+        return {"warning": "No active session."}
+
+    # -- /help ---------------------------------------------------------------
+    if cmd_name == "help":
+        lines = ["Available commands:"]
+        for name, desc in _BUILTIN_COMMANDS.items():
+            lines.append(f"  /{name} — {desc}")
+        return {"output": "\n".join(lines)}
+
+    return {"warning": f"Unknown command: /{cmd_name}"}
+
+
+# ---------------------------------------------------------------------------
+# Completion
+# ---------------------------------------------------------------------------
+
+async def handle_complete_path(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Return file/directory path completions for ``@file:`` references.
+
+    Frontend sends: { word, session_id?, cwd? }
+    """
+    word = params.get("word", "")
+    cwd = params.get("cwd")
+
+    # Resolve cwd: explicit param > session cwd > home dir
+    if not cwd:
+        session_id = params.get("session_id", "")
+        session = sessions.get_session(session_id)
+        if session and session.cwd:
+            cwd = session.cwd
+    if not cwd:
+        cwd = os.path.expanduser("~")
+
+    # Extract the path fragment after '@file:' or use the whole word
+    prefix = word
+    for marker in ("@file:", "@folder:", "@dir:", "@"):
+        if word.startswith(marker):
+            prefix = word[len(marker):]
+            break
+
+    # Expand ~ and make absolute
+    prefix = os.path.expanduser(prefix)
+    if not os.path.isabs(prefix):
+        prefix = os.path.join(cwd, prefix)
+
+    # Glob for matches
+    base_dir = os.path.dirname(prefix)
+    pattern = os.path.basename(prefix) + "*"
+    try:
+        entries = sorted(glob.glob(os.path.join(base_dir, pattern)))
+    except (OSError, ValueError):
+        entries = []
+
+    items: list[dict[str, str]] = []
+    for entry in entries[:50]:  # Cap results
+        name = os.path.basename(entry)
+        is_dir = os.path.isdir(entry)
+        items.append({
+            "text": name + ("/" if is_dir else ""),
+            "display": name,
+            "meta": "dir" if is_dir else os.path.splitext(name)[1] or "file",
+        })
+
+    return {"items": items}
+
+
+async def handle_complete_slash(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Return slash command completions.
+
+    Frontend sends: { text }
+    """
+    text = params.get("text", "").lstrip("/").lower()
+    items: list[dict[str, str]] = []
+    for name, desc in _BUILTIN_COMMANDS.items():
+        if not text or name.startswith(text):
+            items.append({
+                "text": f"/{name}",
+                "display": f"/{name}",
+                "meta": desc,
+            })
+    return {"items": items}
+
+
+# ---------------------------------------------------------------------------
+# Approval / sudo / secret / clarify interaction
+# ---------------------------------------------------------------------------
+
+# In-memory store of pending approval requests that the agent subprocess
+# is waiting on.  Keyed by request_id, each holds an asyncio.Event and the
+# user's response once resolved.
+_pending_approvals: dict[str, dict[str, Any]] = {}
+
+
+async def _wait_for_approval(request_id: str, timeout: float = 300.0) -> dict[str, Any] | None:
+    """Block until the user responds to an approval request, or timeout."""
+    evt = asyncio.Event()
+    _pending_approvals[request_id] = {"event": evt, "response": None}
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=timeout)
+        return _pending_approvals[request_id]["response"]
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        _pending_approvals.pop(request_id, None)
+
+
+async def handle_approval_respond(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """User responds to an approval request (approve / reject)."""
+    choice = params.get("choice", "reject")
+    session_id = params.get("session_id")
+
+    # For now, resolve any pending approval for this session
+    # (the request_id matching is handled via the event system in a
+    # future iteration with full agent protocol support)
+    resolved = False
+    for rid, pending in list(_pending_approvals.items()):
+        if not pending.get("event").is_set():
+            pending["response"] = {"choice": choice, "session_id": session_id}
+            pending["event"].set()
+            resolved = True
+            break
+
+    return {"resolved": resolved}
+
+
+async def handle_sudo_respond(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """User provides a sudo password."""
+    request_id = params.get("request_id", "")
+    password = params.get("password", "")
+
+    pending = _pending_approvals.get(request_id)
+    if pending and not pending["event"].is_set():
+        pending["response"] = {"type": "sudo", "password": password}
+        pending["event"].set()
+        return {"status": "ok"}
+
+    return {"status": "no_pending_request"}
+
+
+async def handle_secret_respond(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """User provides a secret/API key value."""
+    request_id = params.get("request_id", "")
+    value = params.get("value", "")
+
+    pending = _pending_approvals.get(request_id)
+    if pending and not pending["event"].is_set():
+        pending["response"] = {"type": "secret", "value": value}
+        pending["event"].set()
+        return {"status": "ok"}
+
+    return {"status": "no_pending_request"}
+
+
+async def handle_clarify_respond(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """User answers a clarification question from the agent."""
+    request_id = params.get("request_id", "")
+    answer = params.get("answer", "")
+
+    pending = _pending_approvals.get(request_id)
+    if pending and not pending["event"].is_set():
+        pending["response"] = {"type": "clarify", "answer": answer}
+        pending["event"].set()
+        return {"ok": True}
+
+    return {"ok": False, "message": "No pending request found"}
 
 
 # ---------------------------------------------------------------------------

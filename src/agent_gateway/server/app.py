@@ -102,6 +102,16 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     dispatcher.register("setup.status", m.handle_setup_status)
     dispatcher.register("setup.runtime_check", m.handle_setup_runtime_check)
 
+    # Phase 1: Core UX methods
+    dispatcher.register("session.title", m.handle_session_title)
+    dispatcher.register("slash.exec", m.handle_slash_exec)
+    dispatcher.register("complete.path", m.handle_complete_path)
+    dispatcher.register("complete.slash", m.handle_complete_slash)
+    dispatcher.register("approval.respond", m.handle_approval_respond)
+    dispatcher.register("sudo.respond", m.handle_sudo_respond)
+    dispatcher.register("secret.respond", m.handle_secret_respond)
+    dispatcher.register("clarify.respond", m.handle_clarify_respond)
+
     # ------------------------------------------------------------------
     # HTTP endpoints
     # ------------------------------------------------------------------
