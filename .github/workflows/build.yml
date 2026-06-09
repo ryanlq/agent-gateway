@@ -40,10 +40,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv pip install -e ".[desktop]"
-
-      - name: Install PyInstaller
-        run: uv pip install pyinstaller procstream
+        run: uv sync --extra desktop --inexact
 
       - name: Build executable
         run: uv run pyinstaller agent_gateway.spec --clean
