@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml>=6.0",
+    "procstream>=0.2.0",
 ]
 
 [project.optional-dependencies]

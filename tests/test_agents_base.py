@@ -115,7 +115,7 @@ class TestSubprocessPool:
 class _DummyBridge(CLIAgentBridge):
     """Minimal concrete bridge for testing base class methods."""
 
-    def _build_args(self, session_key, message, history, system_extra):
+    def _build_args(self, session_key, message, history, system_extra, session_ref=None):
         return ["echo", message]
 
     async def _parse_output(self, raw_stdout, session_key):

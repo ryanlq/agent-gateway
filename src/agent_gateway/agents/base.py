@@ -23,7 +23,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Awaitable
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -509,11 +509,9 @@ class CLIAgentBridge(ABC):
     ) -> AsyncIterator[str]:
         """Execute a subprocess, yielding stdout lines as they arrive.
 
-        Uses ``stdbuf -oL`` to force line-buffering on the child's stdout
-        so output is flushed after each line even when writing to a pipe.
-        This avoids the complexity and pitfalls of pty (EIO on slave close,
-        echo artifacts, terminal escape sequences) while still providing
-        real-time streaming for agents that don't flush on their own.
+        Uses ``procstream`` for cross-platform real-time streaming. Unlike stdbuf,
+        this works on Windows/macOS/Linux by using thread-backed pipe reading
+        or PTY where available.
         """
         effective_timeout = timeout or self.config.timeout
 
@@ -521,53 +519,41 @@ class CLIAgentBridge(ABC):
         if self.config.env:
             env.update(self.config.env)
 
-        # Prepend stdbuf to force line-buffering on stdout
-        final_args = ["stdbuf", "-oL"] + args
-        self._logger.debug("Streaming: %s", " ".join(final_args))
+        self._logger.debug("Streaming: %s", " ".join(args))
 
-        proc = await asyncio.create_subprocess_exec(
-            *final_args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        try:
+            from procstream import arun
+        except ImportError:
+            raise CLIAgentError(
+                "procstream is required for streaming. Install with: pip install procstream"
+            )
+
+        proc = await arun(
+            args,
+            timeout=effective_timeout,
             cwd=self.config.cwd,
+            env=env,
+            stdin=input_text or None,
         )
-
-        # Write input and close stdin so the process knows we're done sending
-        if input_text and proc.stdin:
-            proc.stdin.write(input_text.encode())
-            proc.stdin.close()
 
         total_bytes = 0
         try:
-            async for raw_line in proc.stdout:
-                total_bytes += len(raw_line)
+            async for line in proc.stream():
+                if line.is_stderr:
+                    continue
+                total_bytes += len(line.text.encode())
                 if total_bytes > self.config.max_output_bytes:
                     self._logger.warning("Streaming output exceeded %d bytes, killing process", self.config.max_output_bytes)
                     proc.kill()
                     break
-                line = raw_line.decode(errors="replace").rstrip("\n")
-                if line:
-                    yield line
-        except asyncio.TimeoutError:
-            self._logger.warning("Streaming subprocess timed out after %.1fs", effective_timeout)
-            proc.kill()
+                if line.text:
+                    yield line.text
         except asyncio.CancelledError:
             self._logger.debug("Streaming cancelled, killing subprocess")
             proc.kill()
             raise
         finally:
-            # Always reap the process to prevent zombie processes
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self._logger.warning("Process (pid %d) did not exit after kill, sending SIGKILL", proc.pid or 0)
-                proc.kill()
-                await proc.wait()
-
-            returncode = proc.returncode or 0
-            self._logger.debug("Streaming process exited (code %d, %d bytes)", returncode, total_bytes)
+            await proc.wait()
 
     # -- Cleanup ------------------------------------------------------------
 
