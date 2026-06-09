@@ -319,18 +319,6 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     async def rest_profiles_delete(name: str) -> dict[str, Any]:
         return {"ok": True, "path": ""}
 
-    @app.get("/api/profiles/{name}/soul")
-    async def rest_profiles_soul(name: str) -> dict[str, Any]:
-        return {"content": ""}
-
-    @app.put("/api/profiles/{name}/soul")
-    async def rest_profiles_soul_update(name: str) -> dict[str, Any]:
-        return {"ok": True}
-
-    @app.get("/api/profiles/{name}/setup-command")
-    async def rest_profiles_setup_command(name: str) -> dict[str, Any]:
-        return {"command": ""}
-
     # -- Config ------------------------------------------------------------
     # Frontend config is stored under a single "hermes_config" key in
     # gateway-config.json to isolate it from gateway-internal keys like
@@ -507,26 +495,6 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     async def rest_providers_validate_post(request: Request) -> dict[str, Any]:
         return {"ok": True, "reachable": True, "message": "ok"}
 
-    @app.get("/api/providers/oauth")
-    async def rest_providers_oauth(request: Request) -> dict[str, Any]:
-        return {"providers": []}
-
-    @app.post("/api/providers/oauth/{provider_id}/start")
-    async def rest_oauth_start(provider_id: str) -> dict[str, Any]:
-        return {"session_id": "", "auth_url": ""}
-
-    @app.post("/api/providers/oauth/{provider_id}/submit")
-    async def rest_oauth_submit(provider_id: str) -> dict[str, Any]:
-        return {"ok": True}
-
-    @app.get("/api/providers/oauth/{provider_id}/poll/{session_id}")
-    async def rest_oauth_poll(provider_id: str, session_id: str) -> dict[str, Any]:
-        return {"status": "complete"}
-
-    @app.delete("/api/providers/oauth/sessions/{session_id}")
-    async def rest_oauth_cancel_session(session_id: str) -> dict[str, Any]:
-        return {"ok": True}
-
     # -- Skills & Tools ----------------------------------------------------
 
     @app.get("/api/skills")
@@ -563,12 +531,6 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     @app.patch("/api/tools/toolsets/{name}/provider")
     async def rest_toolset_provider_set(name: str) -> dict[str, Any]:
         return {"ok": True}
-
-    # -- Logs --------------------------------------------------------------
-
-    @app.get("/api/logs")
-    async def rest_logs(request: Request) -> dict[str, Any]:
-        return {"logs": [], "lines": []}
 
     # -- Messaging ---------------------------------------------------------
 
@@ -641,42 +603,13 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     async def rest_cron_trigger(job_id: str) -> dict[str, Any]:
         return {"ok": True, "id": job_id}
 
-    # -- Analytics ---------------------------------------------------------
-
-    @app.get("/api/analytics/usage")
-    async def rest_analytics_usage(request: Request) -> dict[str, Any]:
-        return {"daily": [], "models": [], "skills": [],
-                "totals": {}, "skills_summary": {}}
-
-    # -- Audio -------------------------------------------------------------
-
-    @app.post("/api/audio/transcribe")
-    async def rest_audio_transcribe(request: Request) -> dict[str, Any]:
-        return {"text": ""}
-
-    @app.post("/api/audio/speak")
-    async def rest_audio_speak(request: Request) -> dict[str, Any]:
-        return {"audio_url": ""}
-
-    @app.get("/api/audio/elevenlabs/voices")
-    async def rest_elevenlabs_voices(request: Request) -> dict[str, Any]:
-        return {"voices": []}
-
-    # -- Gateway / Updates / Actions ----------------------------------------
+    # -- Gateway / Updates -------------------------------------------------
 
     @app.post("/api/gateway/restart")
     async def rest_gateway_restart(request: Request) -> dict[str, Any]:
         return {"ok": True}
 
-    @app.post("/api/hermes/update")
-    async def rest_hermes_update(request: Request) -> dict[str, Any]:
-        return {"ok": True, "updated": False}
-
-    @app.get("/api/actions/{name}/status")
-    async def rest_action_status(name: str) -> dict[str, Any]:
-        return {"name": name, "status": "idle", "running": False, "lines": []}
-
-    # -- Auth (WebSocket ticket for OAuth) ---------------------------------
+    # -- Auth (WebSocket ticket) -------------------------------------------
 
     @app.post("/api/auth/ws-ticket")
     async def rest_auth_ws_ticket(request: Request) -> dict[str, Any]:
