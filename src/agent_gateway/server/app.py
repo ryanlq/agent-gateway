@@ -615,6 +615,21 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     async def rest_auth_ws_ticket(request: Request) -> dict[str, Any]:
         return {"ticket": ""}
 
+    # -- Frontend startup stubs (called during app boot, return empty data) --
+
+    @app.get("/api/logs")
+    async def rest_logs(request: Request) -> dict[str, Any]:
+        return {"logs": [], "lines": []}
+
+    @app.get("/api/analytics/usage")
+    async def rest_analytics_usage(request: Request) -> dict[str, Any]:
+        return {"daily": [], "models": [], "skills": [],
+                "totals": {}, "skills_summary": {}}
+
+    @app.post("/api/hermes/update")
+    async def rest_hermes_update(request: Request) -> dict[str, Any]:
+        return {"ok": True, "updated": False}
+
     # ------------------------------------------------------------------
     # WebSocket JSON-RPC endpoint
     # ------------------------------------------------------------------
