@@ -23,7 +23,7 @@ jobs:
             ext: ''
           - os: windows-latest
             artifact_name: agent-gateway-windows
-            asset_name: agent-gateway-windows-amd64
+            asset_name: agent-gateway-windows-amd64.exe
             ext: '.exe'
 
     steps:
@@ -44,7 +44,7 @@ jobs:
 
       - name: Rename artifact
         run: |
-          mv dist/agent-gateway${{ matrix.ext }} dist/${{ matrix.asset_name }}
+          mv dist/agent-gateway${{ matrix.ext }} dist/${{ matrix.asset_name }} || move dist/agent-gateway${{ matrix.ext }} dist/${{ matrix.asset_name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
