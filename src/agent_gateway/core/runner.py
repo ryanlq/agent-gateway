@@ -388,6 +388,13 @@ class GatewayRunner:
             agent_params = {}
 
         bridge = create_bridge(agent_type, **agent_params)
+        # Set default cwd from hermes_config.terminal.cwd if available
+        if self._desktop_store and not bridge.config.cwd:
+            hermes_cfg = self._desktop_store.get_config("hermes_config", {})
+            if isinstance(hermes_cfg, dict):
+                default_cwd = hermes_cfg.get("terminal", {}).get("cwd") if isinstance(hermes_cfg.get("terminal"), dict) else None
+                if default_cwd:
+                    bridge.config.cwd = default_cwd
         try:
             async for chunk in bridge.stream(
                 session_key=session_key,

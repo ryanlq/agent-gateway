@@ -108,6 +108,9 @@ class SessionManager:
         sid = session_id or uuid.uuid4().hex[:16]
         ref = backend_session_ref or str(uuid.uuid4())
         bridge = create_bridge(atype, **(agent_params or {}))
+        # Propagate cwd to the subprocess so agent CLIs run in the right directory
+        if cwd:
+            bridge.config.cwd = cwd
         ws_name = os.path.basename(cwd) if cwd else None
         session = DesktopSession(
             session_id=sid,
@@ -276,6 +279,9 @@ class SessionManager:
         # Create new bridge with params
         session.agent_type = agent_type
         session.bridge = create_bridge(agent_type, **(agent_params or {}))
+        # Preserve cwd from session when switching agents
+        if session.cwd:
+            session.bridge.config.cwd = session.cwd
         # Persist agent params per-agent
         if agent_params and self._store:
             all_params: dict[str, dict] = self._store.get_config("agent_params", {})
