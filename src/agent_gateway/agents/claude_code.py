@@ -90,8 +90,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
         if self.model:
             args.extend(["--model", self.model])
 
-        # Limit agentic turns for gateway usage
-        args.extend(["--max-turns", "1"])
+        # Allow enough turns for Claude to use tools (read files, etc.)
+        args.extend(["--max-turns", "10"])
 
         # Pass session ref for CLI-level session continuity
         if session_ref:
@@ -174,7 +174,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         if self.model:
             args.extend(["--model", self.model])
 
-        args.extend(["--max-turns", "1"])
+        args.extend(["--max-turns", "10"])
 
         if session_ref:
             args.extend(["--session-id", session_ref])
