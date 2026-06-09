@@ -112,6 +112,9 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     dispatcher.register("secret.respond", m.handle_secret_respond)
     dispatcher.register("clarify.respond", m.handle_clarify_respond)
 
+    # Phase 2: Enhanced UX
+    dispatcher.register("session.cwd.set", m.handle_session_cwd_set)
+
     # ------------------------------------------------------------------
     # HTTP endpoints
     # ------------------------------------------------------------------
@@ -344,11 +347,52 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     @app.get("/api/config/defaults")
     async def rest_config_defaults(request: Request) -> dict[str, Any]:
-        return {"defaults": {}}
+        """Return default config values for agent-gateway mode."""
+        return {
+            "defaults": {
+                "display.language": "en",
+                "terminal.cwd": "",
+                "approvals.mode": "suggest",
+                "approvals.timeout": "300",
+                "security.redact_secrets": "true",
+            },
+        }
 
     @app.get("/api/config/schema")
     async def rest_config_schema(request: Request) -> dict[str, Any]:
-        return {"fields": {}}
+        """Return config field schema for the settings page."""
+        return {
+            "category_order": ["model", "chat", "workspace", "safety", "advanced"],
+            "fields": {
+                "display.language": {
+                    "category": "chat",
+                    "type": "select",
+                    "options": ["en", "zh", "ja", "ko"],
+                    "description": "UI display language.",
+                },
+                "terminal.cwd": {
+                    "category": "workspace",
+                    "type": "string",
+                    "description": "Default working directory for new sessions.",
+                },
+                "approvals.mode": {
+                    "category": "safety",
+                    "type": "select",
+                    "options": ["suggest", "auto", "strict"],
+                    "description": "Approval mode: suggest (ask when unsure), auto (allow most), strict (ask always).",
+                },
+                "approvals.timeout": {
+                    "category": "safety",
+                    "type": "number",
+                    "description": "Seconds before an approval request times out.",
+                },
+                "security.redact_secrets": {
+                    "category": "safety",
+                    "type": "boolean",
+                    "description": "Redact API keys and secrets from conversation output.",
+                },
+            },
+        }
 
     @app.patch("/api/config")
     async def rest_config_set(request: Request) -> dict[str, Any]:

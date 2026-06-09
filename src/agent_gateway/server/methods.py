@@ -590,6 +590,45 @@ async def handle_complete_slash(
 
 
 # ---------------------------------------------------------------------------
+# Session working directory
+# ---------------------------------------------------------------------------
+
+async def handle_session_cwd_set(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Change the working directory for a session's agent subprocess.
+
+    Frontend sends: { session_id, cwd }
+    """
+    session_id = params.get("session_id", "")
+    cwd = params.get("cwd", "")
+
+    if not cwd:
+        return {"error": "cwd is required"}
+
+    # Expand ~ and validate
+    cwd = os.path.expanduser(cwd)
+    if not os.path.isdir(cwd):
+        return {"error": f"Not a directory: {cwd}"}
+
+    session = sessions.get_session(session_id)
+    if session is None:
+        return {"error": f"Session {session_id} not found"}
+
+    session.cwd = cwd
+    session.workspace_name = os.path.basename(cwd)
+    # Propagate to bridge subprocess
+    session.bridge.config.cwd = cwd
+
+    sessions.persist_session(session_id)
+    await emit("session.info", _session_info(session), session_id)
+
+    return {"session_id": session_id, "cwd": cwd}
+
+
+# ---------------------------------------------------------------------------
 # Approval / sudo / secret / clarify interaction
 # ---------------------------------------------------------------------------
 
