@@ -161,7 +161,26 @@ class SessionManager:
         bridge_params: dict[str, Any] = {}
         if reasoning:
             bridge_params["reasoning"] = reasoning
+        # Also load stored per-agent params (model, bare, mode, etc.)
+        # so resumed sessions pick up the user's configured defaults.
+        if self._store:
+            all_params: dict[str, dict] = self._store.get_config("agent_params", {})
+            if isinstance(all_params, dict):
+                stored = all_params.get(atype, {})
+                if isinstance(stored, dict):
+                    # Stored params take lower priority than explicit overrides
+                    for k, v in stored.items():
+                        bridge_params.setdefault(k, v)
         bridge = create_bridge(atype, **bridge_params)
+
+        # Generate a fresh backend_session_ref instead of reusing the
+        # persisted one — CLI tools like Claude Code lock session IDs to
+        # a single process and reject reuse with "already in use" errors.
+        new_ref = str(uuid.uuid4())
+
+        # Propagate cwd to the bridge so agent CLIs run in the right directory
+        if persisted.workspace:
+            bridge.config.cwd = persisted.workspace
 
         session = DesktopSession(
             session_id=persisted.session_id,
@@ -171,7 +190,7 @@ class SessionManager:
             created_at=persisted.created_at,
             cwd=persisted.workspace,
             title=persisted.title,
-            backend_session_ref=persisted.backend_session_ref,
+            backend_session_ref=new_ref,
             status=persisted.status,
             workspace_name=persisted.workspace_name,
             reasoning=reasoning,
