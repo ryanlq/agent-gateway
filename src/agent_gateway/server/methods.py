@@ -35,9 +35,17 @@ async def handle_session_create(
     sessions: SessionManager,
 ) -> dict[str, Any]:
     """Create a new chat session."""
+    cwd = params.get("cwd")
+    # Fallback: if no cwd provided, try hermes_config.terminal.cwd
+    if not cwd and sessions._store:
+        hermes_cfg = sessions._store.get_config("hermes_config", {})
+        if isinstance(hermes_cfg, dict):
+            tc = hermes_cfg.get("terminal")
+            if isinstance(tc, dict) and tc.get("cwd"):
+                cwd = tc["cwd"]
     session = await sessions.create_session(
         agent_type=params.get("agent_type"),
-        cwd=params.get("cwd"),
+        cwd=cwd,
     )
     return {
         "session_id": session.session_id,
