@@ -29,8 +29,9 @@ class CronManager:
         await manager.stop()
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, runner: Any = None) -> None:
         self._store = store
+        self._runner = runner
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -61,7 +62,7 @@ class CronManager:
         """Background loop: tick every 60 seconds."""
         while self._running:
             try:
-                await tick(self._store, verbose=True)
+                await tick(self._store, verbose=True, runner=self._runner)
             except asyncio.CancelledError:
                 break
             except Exception as exc:

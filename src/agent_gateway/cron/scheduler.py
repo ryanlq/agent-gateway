@@ -11,7 +11,9 @@ Ported from hermes-agent ``cron/scheduler.py`` with the following changes:
 - Agent execution uses ``create_bridge()`` + ``bridge.chat()`` instead of
   ``AIAgent.run_conversation()``.
 - Parallel execution uses ``asyncio.gather()`` instead of ``ThreadPoolExecutor``.
-- Delivery is local-only for MVP.
+- Delivery routes through the gateway runner's ``DeliveryRouter`` and adapters
+  (Telegram, Email, Discord, Slack, Webhook).  Falls back to local-only when
+  no runner is provided.
 - Skills, profiles, toolsets, prompt injection scanning are stripped.
 """
 
@@ -443,17 +445,168 @@ async def run_job(store: Any, job: dict) -> tuple[bool, str, str, Optional[str]]
 
 
 # =============================================================================
-# Delivery (MVP: local only)
+# Delivery — routes job output to platform adapters
 # =============================================================================
 
 
-def _deliver_result(job: dict, content: str) -> Optional[str]:
-    """Deliver job output.  MVP: local only — output is saved by save_job_output().
+def _resolve_delivery_targets(
+    job: dict,
+    adapters: dict[str, Any],
+    config: Any,
+) -> list[tuple[str, Optional[str], Optional[str]]]:
+    """Resolve the ``deliver`` field to concrete (platform, chat_id, thread_id) tuples.
 
-    Returns None on success, or an error string on failure.
+    Supported ``deliver`` values:
+      - ``None`` / ``"local"`` / ``""`` → local only (no adapter delivery)
+      - ``"telegram"`` / ``"email"`` / ``"discord"`` … → platform home channel
+      - ``"telegram:123456"`` → specific chat
+      - ``"telegram:123:thread"`` → specific thread
+      - ``"all"`` → all platforms that have a ``home_channel`` configured
+      - List of any of the above
+
+    Returns a list of (platform, chat_id, thread_id) tuples where
+    ``chat_id`` is None when the platform's home_channel should be used.
     """
-    # Future: route to adapter via runner.adapters for telegram/email/etc.
-    return None
+    raw = job.get("deliver") or "local"
+
+    # Normalise to a list
+    if isinstance(raw, str):
+        tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    elif isinstance(raw, list):
+        tokens = [str(t).strip() for t in raw if str(t).strip()]
+    else:
+        tokens = ["local"]
+
+    targets: list[tuple[str, Optional[str], Optional[str]]] = []
+
+    for token in tokens:
+        token_lower = token.lower()
+
+        # "local" → skip adapter delivery
+        if token_lower in ("local", ""):
+            continue
+
+        # "all" → expand to every platform with a home_channel
+        if token_lower == "all":
+            if config and hasattr(config, "enabled_platforms"):
+                for name, pcfg in config.enabled_platforms().items():
+                    if name in adapters and pcfg.home_channel:
+                        targets.append((name, pcfg.home_channel, None))
+            continue
+
+        # "platform:chat_id[:thread_id]"
+        if ":" in token:
+            parts = token.split(":", 2)
+            platform = parts[0].lower()
+            chat_id = parts[1] if len(parts) > 1 else None
+            thread_id = parts[2] if len(parts) > 2 else None
+            if platform in adapters:
+                targets.append((platform, chat_id, thread_id))
+            else:
+                logger.warning(
+                    "Job '%s': deliver target '%s' — no adapter for '%s'",
+                    job.get("id"), token, platform,
+                )
+            continue
+
+        # Bare platform name → use home_channel
+        if token_lower in adapters:
+            home = None
+            if config and hasattr(config, "get_platform"):
+                pcfg = config.get_platform(token_lower)
+                home = pcfg.home_channel if pcfg else None
+            if home:
+                targets.append((token_lower, home, None))
+            else:
+                logger.warning(
+                    "Job '%s': deliver '%s' has no home_channel configured",
+                    job.get("id"), token_lower,
+                )
+        else:
+            logger.warning(
+                "Job '%s': deliver target '%s' — no adapter connected",
+                job.get("id"), token,
+            )
+
+    return targets
+
+
+async def _deliver_result(
+    job: dict,
+    content: str,
+    runner: Any = None,
+) -> Optional[str]:
+    """Deliver job output to the configured platform(s).
+
+    Uses the ``DeliveryRouter`` from the gateway runner when available.
+    Falls back to local-only (output saved by ``save_job_output()``) when
+    no runner is provided or no adapters are connected.
+
+    Returns ``None`` on success, or an error string on failure.
+    """
+    adapters: dict[str, Any] = {}
+    config: Any = None
+    delivery_router: Any = None
+
+    if runner:
+        adapters = getattr(runner, "adapters", {}) or {}
+        config = getattr(runner, "config", None)
+        delivery_router = getattr(runner, "delivery_router", None)
+
+    # Resolve targets
+    targets = _resolve_delivery_targets(job, adapters, config)
+
+    if not targets:
+        # Local-only — output already saved by save_job_output()
+        return None
+
+    if not delivery_router:
+        return (
+            f"Cannot deliver to {targets}: no delivery router available "
+            "(runner not started or no adapters connected)"
+        )
+
+    from agent_gateway.core.delivery import DeliveryTarget
+
+    errors: list[str] = []
+
+    for platform, chat_id, thread_id in targets:
+        target = DeliveryTarget(
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+
+        try:
+            result = await delivery_router.deliver(
+                content=content,
+                target=target,
+                job_id=job.get("id"),
+                job_name=job.get("name"),
+                metadata={"source": "cron", "job_id": job.get("id", "unknown")},
+            )
+
+            if not result.get("success"):
+                err = result.get("error", "unknown error")
+                errors.append(f"{platform}: {err}")
+                logger.error(
+                    "Cron delivery to %s failed for job '%s': %s",
+                    platform, job.get("id"), err,
+                )
+            else:
+                logger.info(
+                    "Cron delivery to %s succeeded for job '%s'",
+                    platform, job.get("id"),
+                )
+
+        except Exception as exc:
+            errors.append(f"{platform}: {exc}")
+            logger.error(
+                "Cron delivery to %s failed for job '%s': %s",
+                platform, job.get("id"), exc,
+            )
+
+    return "; ".join(errors) if errors else None
 
 
 # =============================================================================
@@ -461,7 +614,7 @@ def _deliver_result(job: dict, content: str) -> Optional[str]:
 # =============================================================================
 
 
-async def tick(store: Any, verbose: bool = True) -> int:
+async def tick(store: Any, verbose: bool = True, runner: Any = None) -> int:
     """Check and run all due jobs.
 
     Uses a file lock so only one tick runs at a time.
@@ -469,6 +622,7 @@ async def tick(store: Any, verbose: bool = True) -> int:
     Args:
         store: SessionStore for resolving agent config.
         verbose: Whether to log status messages.
+        runner: Optional ``GatewayRunner`` for platform adapter delivery.
 
     Returns:
         Number of jobs executed (0 if another tick is already running).
@@ -529,7 +683,7 @@ async def tick(store: Any, verbose: bool = True) -> int:
                 delivery_error = None
                 if should_deliver:
                     try:
-                        delivery_error = _deliver_result(job, deliver_content)
+                        delivery_error = await _deliver_result(job, deliver_content, runner=runner)
                     except Exception as de:
                         delivery_error = str(de)
 

@@ -46,7 +46,7 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     # -- Cron manager -------------------------------------------------------
     from agent_gateway.cron.manager import CronManager
-    cron_manager = CronManager(store)
+    cron_manager = CronManager(store, runner=runner)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -615,6 +615,9 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
                 schedule=body.get("schedule", ""),
                 name=body.get("name"),
                 deliver=body.get("deliver"),
+                script=body.get("script"),
+                no_agent=body.get("no_agent", False),
+                context_from=body.get("context_from"),
             )
             return _job_to_api(job)
         except Exception as e:
