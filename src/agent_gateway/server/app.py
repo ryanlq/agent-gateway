@@ -44,6 +44,10 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     sessions = SessionManager(session_store=store)
     dispatcher = Dispatcher(sessions)
 
+    # -- Cron manager -------------------------------------------------------
+    from agent_gateway.cron.manager import CronManager
+    cron_manager = CronManager(store)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Graceful startup/shutdown: manage sessions and platform adapters."""
@@ -60,7 +64,19 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
             except Exception as exc:
                 logger.error("Failed to start platform adapters: %s", exc)
 
+        # Start cron scheduler
+        try:
+            await cron_manager.start()
+        except Exception as exc:
+            logger.error("Failed to start cron scheduler: %s", exc)
+
         yield
+
+        # Stop cron scheduler
+        try:
+            await cron_manager.stop()
+        except Exception as exc:
+            logger.error("Error stopping cron scheduler: %s", exc)
 
         # Stop platform adapters
         if runner:
@@ -567,41 +583,92 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     # -- Cron --------------------------------------------------------------
 
+    def _job_to_api(job: dict | None) -> dict[str, Any]:
+        """Map internal job dict to the frontend CronJob type."""
+        if job is None:
+            return {}
+        return {
+            "id": job.get("id", ""),
+            "name": job.get("name") or None,
+            "prompt": job.get("prompt") or None,
+            "script": job.get("script") or None,
+            "deliver": job.get("deliver") or None,
+            "schedule": job.get("schedule"),
+            "schedule_display": job.get("schedule_display") or None,
+            "enabled": job.get("enabled", True),
+            "state": job.get("state") or None,
+            "last_run_at": job.get("last_run_at") or None,
+            "last_error": job.get("last_error") or None,
+            "next_run_at": job.get("next_run_at") or None,
+        }
+
     @app.get("/api/cron/jobs")
     async def rest_cron_jobs(request: Request) -> list:
-        return []
+        return [_job_to_api(j) for j in cron_manager.list_jobs()]
 
     @app.post("/api/cron/jobs")
     async def rest_cron_create(request: Request) -> dict[str, Any]:
-        return {"id": "", "ok": True}
+        body = await request.json() if await request.body() else {}
+        try:
+            job = cron_manager.create_job(
+                prompt=body.get("prompt", ""),
+                schedule=body.get("schedule", ""),
+                name=body.get("name"),
+                deliver=body.get("deliver"),
+            )
+            return _job_to_api(job)
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
 
     @app.get("/api/cron/jobs/{job_id}")
     async def rest_cron_job(job_id: str) -> dict[str, Any]:
-        return {"id": job_id}
+        job = cron_manager.get_job(job_id)
+        if not job:
+            return JSONResponse(status_code=404, content={"error": "Job not found"})
+        return _job_to_api(job)
 
     @app.patch("/api/cron/jobs/{job_id}")
-    async def rest_cron_update(job_id: str) -> dict[str, Any]:
-        return {"ok": True}
+    async def rest_cron_update(job_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json() if await request.body() else {}
+        job = cron_manager.update_job(job_id, body)
+        if not job:
+            return JSONResponse(status_code=404, content={"error": "Job not found"})
+        return _job_to_api(job)
 
     @app.put("/api/cron/jobs/{job_id}")
-    async def rest_cron_update_put(job_id: str) -> dict[str, Any]:
-        return {"ok": True}
+    async def rest_cron_update_put(job_id: str, request: Request) -> dict[str, Any]:
+        body = await request.json() if await request.body() else {}
+        updates = body.get("updates", body)
+        job = cron_manager.update_job(job_id, updates)
+        if not job:
+            return JSONResponse(status_code=404, content={"error": "Job not found"})
+        return _job_to_api(job)
 
     @app.delete("/api/cron/jobs/{job_id}")
     async def rest_cron_delete(job_id: str) -> dict[str, Any]:
-        return {"ok": True}
+        ok = cron_manager.delete_job(job_id)
+        return {"ok": ok}
 
     @app.post("/api/cron/jobs/{job_id}/pause")
     async def rest_cron_pause(job_id: str) -> dict[str, Any]:
-        return {"ok": True, "id": job_id}
+        job = cron_manager.pause_job(job_id)
+        if not job:
+            return JSONResponse(status_code=404, content={"error": "Job not found"})
+        return _job_to_api(job)
 
     @app.post("/api/cron/jobs/{job_id}/resume")
     async def rest_cron_resume(job_id: str) -> dict[str, Any]:
-        return {"ok": True, "id": job_id}
+        job = cron_manager.resume_job(job_id)
+        if not job:
+            return JSONResponse(status_code=404, content={"error": "Job not found"})
+        return _job_to_api(job)
 
     @app.post("/api/cron/jobs/{job_id}/trigger")
     async def rest_cron_trigger(job_id: str) -> dict[str, Any]:
-        return {"ok": True, "id": job_id}
+        job = cron_manager.trigger_job(job_id)
+        if not job:
+            return JSONResponse(status_code=404, content={"error": "Job not found"})
+        return _job_to_api(job)
 
     # -- Gateway / Updates -------------------------------------------------
 
