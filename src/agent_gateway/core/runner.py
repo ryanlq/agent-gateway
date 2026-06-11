@@ -280,9 +280,11 @@ class GatewayRunner:
             tool_progress_mode=self.config.streaming.tool_progress,
             tool_preview_length=self.config.streaming.tool_preview_length,
         )
+        consumer_metadata = {"thread_id": source.thread_id} if source.thread_id else None
         consumer = StreamConsumer(
             adapter, source.chat_id, stream_config,
             reply_to=event.reply_to_message_id,
+            metadata=consumer_metadata,
         )
 
         # Determine the session ID for desktop events (if applicable)

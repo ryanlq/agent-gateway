@@ -186,6 +186,20 @@ def _strip_html(html: str) -> str:
     return text.strip()
 
 
+def _normalize_subject(subject: str) -> str:
+    """Strip Re:/Fwd: prefixes to produce a stable thread identifier."""
+    s = subject.strip()
+    while True:
+        lower = s.lower()
+        if lower.startswith("re:"):
+            s = s[3:].strip()
+        elif lower.startswith("fwd:"):
+            s = s[4:].strip()
+        else:
+            break
+    return s
+
+
 def _extract_email_address(raw: str) -> str:
     """Extract bare email address from 'Name <addr>' format."""
     match = re.search(r"<([^>]+)>", raw)
@@ -314,8 +328,13 @@ class EmailAdapter(BasePlatformAdapter):
         self._seen_uids_max: int = 2000
         self._poll_task: Optional[asyncio.Task] = None
 
-        # Map chat_id (sender email) -> last subject + message-id for threading
-        self._thread_context: dict[str, dict[str, str]] = {}
+        # Map (chat_id, normalized_subject) -> last subject + message-id for threading
+        self._thread_context: dict[tuple[str, str], dict[str, str]] = {}
+
+        # Reverse index: RFC Message-ID -> (addr, normalized_subject) for
+        # In-Reply-To thread resolution (covers non-standard Re: prefixes,
+        # subject changes, and localised reply markers like Aw:, Réf :, etc.)
+        self._msg_id_to_thread: dict[str, tuple[str, str]] = {}
 
         self._name = "Email"
         logger.info("[Email] Adapter initialized for %s", self._address)
@@ -331,6 +350,24 @@ class EmailAdapter(BasePlatformAdapter):
             logger.debug("[Email] Trimmed seen UIDs to %d entries", len(self._seen_uids))
         except (ValueError, TypeError):
             self._seen_uids = set(list(self._seen_uids)[-self._seen_uids_max // 2:])
+
+    def _lookup_thread_context(
+        self, to_addr: str, thread_id: str | None = None
+    ) -> dict[str, str]:
+        """Look up thread context by (addr, normalized_subject).
+
+        Falls back to the most recent entry for *to_addr* when *thread_id*
+        is ``None`` or not found.
+        """
+        if thread_id:
+            ctx = self._thread_context.get((to_addr, thread_id))
+            if ctx:
+                return ctx
+        # Fallback: find any entry for this address
+        for (addr, _subj), ctx in self._thread_context.items():
+            if addr == to_addr:
+                return ctx
+        return {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -518,16 +555,32 @@ class EmailAdapter(BasePlatformAdapter):
             if att["type"] == "image":
                 msg_type = MessageType.PHOTO
 
-        # Store thread context for reply threading
-        self._thread_context[sender_addr] = {
+        # Resolve thread identity:
+        # 1. In-Reply-To → look up the parent thread (most reliable — handles
+        #    localised reply prefixes like Aw:, Réf :, Ответ: and subject edits)
+        # 2. Subject normalization → strip Re:/Fwd: prefixes (fallback)
+        in_reply_to = msg_data["in_reply_to"]
+        normalized = _normalize_subject(subject)
+        if in_reply_to and in_reply_to in self._msg_id_to_thread:
+            parent_addr, parent_subject = self._msg_id_to_thread[in_reply_to]
+            if parent_addr == sender_addr:
+                normalized = parent_subject
+
+        # Store thread context (keyed by sender + normalized subject)
+        self._thread_context[(sender_addr, normalized)] = {
             "subject": subject,
             "message_id": msg_data["message_id"],
         }
+
+        # Register this message's Message-ID for future In-Reply-To lookups
+        if msg_data["message_id"]:
+            self._msg_id_to_thread[msg_data["message_id"]] = (sender_addr, normalized)
 
         source = MessageSource(
             platform="email",
             user_id=sender_addr,
             chat_id=sender_addr,
+            thread_id=normalized or None,
             chat_type=ChatType.DM,
             display_name=msg_data["sender_name"] or sender_addr,
         )
@@ -567,9 +620,12 @@ class EmailAdapter(BasePlatformAdapter):
         """Send an email reply to the given address."""
         try:
             loop = asyncio.get_running_loop()
+            thread_id = (metadata or {}).get("thread_id")
             message_id = await loop.run_in_executor(
-                None, self._send_email, chat_id, content, reply_to
+                None, self._send_email, chat_id, content, reply_to, thread_id
             )
+            if message_id and thread_id:
+                self._msg_id_to_thread[message_id] = (chat_id, thread_id)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             logger.error("[Email] Send failed to %s: %s", chat_id, e)
@@ -580,6 +636,7 @@ class EmailAdapter(BasePlatformAdapter):
         to_addr: str,
         body: str,
         reply_to_msg_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Send an email via SMTP. Runs in executor thread."""
         msg = MIMEMultipart()
@@ -587,7 +644,7 @@ class EmailAdapter(BasePlatformAdapter):
         msg["To"] = to_addr
 
         # Thread context for reply
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._lookup_thread_context(to_addr, thread_id)
         subject = ctx.get("subject", "Agent Gateway")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -667,13 +724,17 @@ class EmailAdapter(BasePlatformAdapter):
 
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
+            thread_id = (metadata or {}).get("thread_id")
+            out_msg_id = await loop.run_in_executor(
                 None,
                 self._send_email_with_attachments,
                 chat_id,
                 body,
                 local_paths,
+                thread_id,
             )
+            if out_msg_id and thread_id:
+                self._msg_id_to_thread[out_msg_id] = (chat_id, thread_id)
         except Exception as e:
             logger.error("[Email] Multi-image send failed, falling back: %s", e, exc_info=True)
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
@@ -683,13 +744,14 @@ class EmailAdapter(BasePlatformAdapter):
         to_addr: str,
         body: str,
         file_paths: list[str],
+        thread_id: Optional[str] = None,
     ) -> str:
         """Send an email with multiple file attachments via SMTP."""
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._lookup_thread_context(to_addr, thread_id)
         subject = ctx.get("subject", "Agent Gateway")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -745,6 +807,7 @@ class EmailAdapter(BasePlatformAdapter):
         """Send a file as an email attachment."""
         try:
             loop = asyncio.get_running_loop()
+            thread_id = (metadata or {}).get("thread_id")
             message_id = await loop.run_in_executor(
                 None,
                 self._send_email_with_attachment,
@@ -752,7 +815,10 @@ class EmailAdapter(BasePlatformAdapter):
                 caption or "",
                 file_path,
                 file_name,
+                thread_id,
             )
+            if message_id and thread_id:
+                self._msg_id_to_thread[message_id] = (chat_id, thread_id)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             logger.error("[Email] Send document failed: %s", e)
@@ -764,13 +830,14 @@ class EmailAdapter(BasePlatformAdapter):
         body: str,
         file_path: str,
         file_name: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Send an email with a file attachment via SMTP."""
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._lookup_thread_context(to_addr, thread_id)
         subject = ctx.get("subject", "Agent Gateway")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -812,7 +879,7 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Return basic info about the email chat."""
-        ctx = self._thread_context.get(chat_id, {})
+        ctx = self._lookup_thread_context(chat_id)
         return {
             "name": chat_id,
             "type": "dm",
