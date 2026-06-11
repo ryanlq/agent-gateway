@@ -227,6 +227,10 @@ class BasePlatformAdapter(ABC):
 
     # -- Draft streaming (advanced) -----------------------------------------
 
+    def supports_edit(self) -> bool:
+        """Whether this adapter supports editing previously sent messages."""
+        return False
+
     def supports_draft_streaming(
         self,
         chat_type: Optional[ChatType] = None,

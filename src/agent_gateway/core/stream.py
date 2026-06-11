@@ -45,6 +45,15 @@ class StreamConsumerConfig:
     tool_preview_length: int = 40
     """Max characters of tool argument preview."""
 
+    send_final_only: bool = False
+    """Buffer all output and send a single message in ``finish()``.
+
+    Use for platforms where each ``send()`` creates a new message and
+    ``edit_message`` is unsupported (e.g. email).  Intermediate deltas
+    and tool-progress notifications are suppressed so the user receives
+    exactly one complete response.
+    """
+
 
 class StreamConsumer:
     """
@@ -105,6 +114,9 @@ class StreamConsumer:
 
         self._buffer += text
 
+        if self.config.send_final_only:
+            return
+
         now = time.monotonic()
         if now - self._last_edit_time >= self.config.min_edit_interval:
             self._schedule_flush()
@@ -130,10 +142,13 @@ class StreamConsumer:
 
         Renders tool progress on the platform if the adapter supports it.
         """
+        self._tool_count += 1
+
         if self.config.tool_progress_mode == "none":
             return
 
-        self._tool_count += 1
+        if self.config.send_final_only:
+            return
 
         # Build tool progress text
         tool_text = f"⚙️ {tool_name}"
@@ -175,7 +190,28 @@ class StreamConsumer:
         content = final_content or self._buffer
 
         if not content:
-            return SendResult(success=True)
+            content = (
+                "⚠️ Processing completed but no response was generated. "
+                "Please try again."
+            )
+            logger.warning(
+                "Stream finished with empty content for %s — sending fallback",
+                self.chat_id,
+            )
+
+        # In final-only mode, no intermediate message was sent, so just
+        # deliver the complete response as a single fresh message.
+        if self.config.send_final_only:
+            try:
+                return await self.adapter.send(
+                    self.chat_id,
+                    content,
+                    reply_to=self.reply_to,
+                    metadata=self.metadata,
+                )
+            except Exception as exc:
+                logger.error("Final send failed: %s", exc)
+                return SendResult(success=False, error=str(exc))
 
         # If we've been editing a message, do the final edit
         if self._message_id and not self._use_draft:

@@ -279,6 +279,10 @@ class GatewayRunner:
             use_draft=self.config.streaming.use_draft,
             tool_progress_mode=self.config.streaming.tool_progress,
             tool_preview_length=self.config.streaming.tool_preview_length,
+            # Platforms that can't edit messages (email, etc.) should buffer
+            # all output and send a single final message — intermediate sends
+            # would create duplicate, un-editable messages.
+            send_final_only=not adapter.supports_edit(),
         )
         consumer_metadata = {"thread_id": source.thread_id} if source.thread_id else None
         consumer = StreamConsumer(
@@ -530,9 +534,11 @@ class GatewayRunner:
     async def _on_busy_session(self, event: MessageEvent, session_key: str) -> bool:
         """Handle a message that arrived while the session was busy."""
         if event.source:
+            meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
             await self.adapters[event.source.platform].send(
                 event.source.chat_id,
                 "⏳ I'm still processing your previous message. Please wait...",
+                metadata=meta,
             )
         return False
 

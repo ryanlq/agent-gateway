@@ -600,6 +600,8 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
             "last_run_at": job.get("last_run_at") or None,
             "last_error": job.get("last_error") or None,
             "next_run_at": job.get("next_run_at") or None,
+            "no_agent": job.get("no_agent", False),
+            "context_from": job.get("context_from") or [],
         }
 
     @app.get("/api/cron/jobs")
