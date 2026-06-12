@@ -1001,6 +1001,44 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     @app.post("/api/gateway/restart")
     async def rest_gateway_restart(request: Request) -> dict[str, Any]:
+        """Restart the gateway runner: stop all adapters, reload config, restart.
+
+        This allows adapter configuration changes to take effect without
+        restarting the entire gateway process.
+        """
+        import asyncio
+
+        if not runner:
+            return {"ok": False, "error": "No runner available"}
+
+        async def _do_restart() -> None:
+            # Stop all running adapters
+            await runner.shutdown()
+            logger.info("Gateway restart: all adapters stopped")
+
+            # Re-migrate yaml → platform_env in case config changed
+            _migrate_yaml_to_platform_env()
+
+            # Set env vars from platform_env so adapters can read them
+            all_env = _get_platform_env()
+            import os
+            for _name, env_vars in all_env.items():
+                for key, val in env_vars.items():
+                    os.environ[key] = val
+
+            # Re-read platform configs from platform_env
+            for name, env_vars in all_env.items():
+                from agent_gateway.core.registry import registry as platform_registry
+                entry = platform_registry.get(name)
+                if not entry:
+                    continue
+                config_dict = dict(env_vars)
+                await runner.start_adapter(name, config_dict)
+
+            logger.info("Gateway restart: adapters restarted")
+
+        # Fire-and-forget so the response can return before shutdown
+        asyncio.create_task(_do_restart())
         return {"ok": True}
 
     # -- Auth (WebSocket ticket) -------------------------------------------
