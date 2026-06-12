@@ -642,6 +642,18 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         for defn in getattr(entry, "env_var_defs", []):
             value = persisted.get(defn.key, os.environ.get(defn.key, ""))
             is_set = bool(value)
+            if is_set and defn.is_password:
+                redacted = "••••••••"
+            elif is_set:
+                # For non-password fields, show a masked hint so the user
+                # knows something is configured without exposing the full value.
+                # Show first 2 chars + "••" for short values, or first 3 + "•••" for longer.
+                if len(value) <= 4:
+                    redacted = value[:1] + "••"
+                else:
+                    redacted = value[:3] + "•••"
+            else:
+                redacted = None
             result.append({
                 "key": defn.key,
                 "description": defn.description,
@@ -651,7 +663,7 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
                 "advanced": defn.advanced,
                 "url": defn.url or None,
                 "is_set": is_set,
-                "redacted_value": "••••••••" if (is_set and defn.is_password) else None,
+                "redacted_value": redacted,
             })
         return result
 

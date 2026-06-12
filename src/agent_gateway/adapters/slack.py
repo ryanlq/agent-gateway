@@ -202,5 +202,11 @@ def register_slack() -> None:
                 required=False,
                 url="https://api.slack.com/apis/connections/socket",
             ),
+            EnvVarDef(
+                key="SLACK_ALLOWED_USERS",
+                description="Comma-separated Slack user IDs",
+                prompt="U12345,U67890",
+                required=False,
+            ),
         ],
     ))

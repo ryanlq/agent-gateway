@@ -323,5 +323,25 @@ def register_discord() -> None:
                 required=True,
                 url="https://discord.com/developers/applications",
             ),
+            EnvVarDef(
+                key="DISCORD_ALLOWED_USERS",
+                description="Comma-separated Discord user IDs",
+                prompt="123456789,987654321",
+                required=False,
+            ),
+            EnvVarDef(
+                key="DISCORD_ALLOW_ALL_USERS",
+                description='Set to "true" to allow all users (development only)',
+                prompt="true",
+                required=False,
+                advanced=True,
+            ),
+            EnvVarDef(
+                key="DISCORD_HOME_CHANNEL",
+                description="Channel ID for proactive messages (cron output, reminders)",
+                prompt="1234567890",
+                required=False,
+                advanced=True,
+            ),
         ],
     ))

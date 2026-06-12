@@ -392,5 +392,11 @@ def register_telegram() -> None:
                 required=True,
                 url="https://core.telegram.org/bots#how-do-i-create-a-bot",
             ),
+            EnvVarDef(
+                key="TELEGRAM_ALLOWED_USERS",
+                description="Comma-separated numeric user IDs from @userinfobot",
+                prompt="123456789,987654321",
+                required=False,
+            ),
         ],
     ))
