@@ -483,6 +483,7 @@ class EmailAdapter(BasePlatformAdapter):
                     subject = _decode_header_value(msg.get("Subject", "(no subject)"))
                     message_id = msg.get("Message-ID", "")
                     in_reply_to = msg.get("In-Reply-To", "")
+                    references = msg.get("References", "")
 
                     # Skip automated/noreply senders before any processing
                     msg_headers = dict(msg.items())
@@ -503,6 +504,7 @@ class EmailAdapter(BasePlatformAdapter):
                         "subject": subject,
                         "message_id": message_id,
                         "in_reply_to": in_reply_to,
+                        "references": references,
                         "body": body,
                         "attachments": attachments,
                         "date": msg.get("Date", ""),
@@ -570,6 +572,7 @@ class EmailAdapter(BasePlatformAdapter):
         self._thread_context[(sender_addr, normalized)] = {
             "subject": subject,
             "message_id": msg_data["message_id"],
+            "references": msg_data.get("references", ""),
         }
 
         # Register this message's Message-ID for future In-Reply-To lookups
@@ -599,6 +602,7 @@ class EmailAdapter(BasePlatformAdapter):
                 "sender": sender_addr,
                 "message_id": msg_data.get("message_id"),
                 "in_reply_to": msg_data.get("in_reply_to"),
+                "references": msg_data.get("references", ""),
             },
         )
 
@@ -650,11 +654,16 @@ class EmailAdapter(BasePlatformAdapter):
             subject = f"Re: {subject}"
         msg["Subject"] = subject
 
-        # Threading headers
+        # Threading headers — build full ancestor chain for References
         original_msg_id = reply_to_msg_id or ctx.get("message_id")
         if original_msg_id:
             msg["In-Reply-To"] = original_msg_id
-            msg["References"] = original_msg_id
+            # Append the original msg-id to any existing references chain
+            existing_refs = ctx.get("references", "").strip()
+            if existing_refs:
+                msg["References"] = f"{existing_refs} {original_msg_id}"
+            else:
+                msg["References"] = original_msg_id
 
         msg["Date"] = formatdate(localtime=True)
         msg_id = f"<agent-gw-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
@@ -791,7 +800,11 @@ class EmailAdapter(BasePlatformAdapter):
         original_msg_id = ctx.get("message_id")
         if original_msg_id:
             msg["In-Reply-To"] = original_msg_id
-            msg["References"] = original_msg_id
+            existing_refs = ctx.get("references", "").strip()
+            if existing_refs:
+                msg["References"] = f"{existing_refs} {original_msg_id}"
+            else:
+                msg["References"] = original_msg_id
 
         msg["Date"] = formatdate(localtime=True)
         msg_id = f"<agent-gw-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
@@ -877,7 +890,11 @@ class EmailAdapter(BasePlatformAdapter):
         original_msg_id = ctx.get("message_id")
         if original_msg_id:
             msg["In-Reply-To"] = original_msg_id
-            msg["References"] = original_msg_id
+            existing_refs = ctx.get("references", "").strip()
+            if existing_refs:
+                msg["References"] = f"{existing_refs} {original_msg_id}"
+            else:
+                msg["References"] = original_msg_id
 
         msg["Date"] = formatdate(localtime=True)
         msg_id = f"<agent-gw-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"

@@ -242,6 +242,12 @@ class GatewayRunner:
         if response and event.source:
             result = await self._send_response(event, response)
 
+            # Register the outgoing Message-ID for email session threading
+            if result and getattr(result, "success", False):
+                self._register_outgoing_email_msg_id(
+                    event, getattr(result, "message_id", None)
+                )
+
             # Handle ephemeral replies
             if isinstance(response, EphemeralReply) and result and result.success and result.message_id:
                 ttl = response.ttl_seconds or 0
@@ -297,13 +303,26 @@ class GatewayRunner:
         if self._desktop_store:
             raw = event.raw_message or {}
             in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
+            references_raw = raw.get("references", "")
             sender = source.user_id.replace("@", "-").replace(".", "-")
-            subject = _normalize_subject(str(raw.get("subject", "")).strip())
+            # Prefer adapter-resolved thread_id (already walked In-Reply-To)
+            # over re-normalizing the raw subject which may have localized
+            # prefixes like "回复:", "Aw:", "Réf :" etc.
+            subject = source.thread_id or _normalize_subject(str(raw.get("subject", "")).strip())
             # Try to find existing session via In-Reply-To
             if in_reply_to:
                 parent = self._desktop_store.find_by_email_message_id(in_reply_to)
                 if parent:
                     desktop_sid = parent.session_id
+            # Walk References header chain as fallback
+            if not desktop_sid and references_raw:
+                for ref_id in references_raw.split():
+                    ref_id = ref_id.strip("<> \t\n")
+                    if ref_id:
+                        parent = self._desktop_store.find_by_email_message_id(ref_id)
+                        if parent:
+                            desktop_sid = parent.session_id
+                            break
             if not desktop_sid:
                 if subject:
                     subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
@@ -350,6 +369,13 @@ class GatewayRunner:
                     )
 
             result = await consumer.finish(full_text)
+
+            # Register the outgoing Message-ID so future In-Reply-To lookups
+            # from the user's email client can find this session.
+            if result and getattr(result, "success", False):
+                self._register_outgoing_email_msg_id(
+                    event, getattr(result, "message_id", None)
+                )
 
             # Notify desktop: stream complete
             if desktop_sid and self.desktop_emit:
@@ -518,7 +544,13 @@ class GatewayRunner:
             target=target,
             reply_to=event.reply_to_message_id,
         )
-        return None  # DeliveryRouter handles errors
+        # Convert delivery dict to SendResult so callers can access message_id
+        if result.get("success"):
+            return SendResult(
+                success=True,
+                message_id=result.get("message_id"),
+            )
+        return None
 
     def _is_user_authorized(self, source: MessageSource) -> bool:
         """Check if the sender is authorised.
@@ -565,14 +597,18 @@ class GatewayRunner:
             return
 
         # --- Session routing strategy ---
-        # 1. If the email has an In-Reply-To header, find the session that
-        #    contains the parent message and append there.
+        # 1. If the email has an In-Reply-To / References header, find the
+        #    session that contains any ancestor message and append there.
         # 2. Otherwise, derive a deterministic session ID from sender + subject
         #    so new topics get their own session.
         raw = event.raw_message or {}
         email_message_id = raw.get("message_id") or event.message_id
         in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
-        subject = _normalize_subject(str(raw.get("subject", "")).strip())
+        references_raw = raw.get("references", "")
+        # Prefer adapter-resolved thread_id (already walked In-Reply-To via
+        # _msg_id_to_thread) over re-normalizing the raw subject which may
+        # have localized prefixes like "回复:", "Aw:", "Réf :" etc.
+        subject = source.thread_id or _normalize_subject(str(raw.get("subject", "")).strip())
         sender = source.user_id.replace("@", "-").replace(".", "-")
 
         desktop_sid: str | None = None
@@ -584,6 +620,22 @@ class GatewayRunner:
             if parent is not None:
                 desktop_sid = parent.session_id
                 existing = parent
+
+        # Strategy 1b: Walk References header chain (ancestor Message-IDs).
+        # Covers the case where In-Reply-To points to the gateway's own
+        # outgoing message (registered via _register_outgoing_email_msg_id)
+        # or when multiple hops exist between the original message and the
+        # current reply.  Works across gateway restarts because _email_msg_ids
+        # is persisted to sessions.json.
+        if desktop_sid is None and references_raw:
+            for ref_id in references_raw.split():
+                ref_id = ref_id.strip("<> \t\n")
+                if ref_id:
+                    parent = store.find_by_email_message_id(ref_id)
+                    if parent is not None:
+                        desktop_sid = parent.session_id
+                        existing = parent
+                        break
 
         # Strategy 2: subject-based deterministic session ID
         if desktop_sid is None:
@@ -630,6 +682,45 @@ class GatewayRunner:
             update_fields["_email_msg_ids"] = msg_ids
         store.update(desktop_sid, **update_fields)
         logger.debug("Synced %d messages to desktop session %s", len(history), desktop_sid)
+
+    def _register_outgoing_email_msg_id(
+        self, event: MessageEvent, message_id: str | None
+    ) -> None:
+        """Register the gateway's outgoing Message-ID in the desktop session.
+
+        When the user later replies to our email, their In-Reply-To will point
+        to this Message-ID.  Without registration, ``find_by_email_message_id``
+        cannot resolve it and the session-linking fallback produces a *new*
+        session (e.g. "回复:xxx" becomes a separate chat).
+        """
+        store = self._desktop_store
+        if not store or not message_id:
+            return
+        raw = event.raw_message or {}
+        in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
+        sender = (event.source.user_id if event.source else "").replace("@", "-").replace(".", "-")
+        # Use adapter-resolved thread_id if available
+        subject = (event.source.thread_id if event.source else None) or _normalize_subject(str(raw.get("subject", "")).strip())
+        # Find the desktop session the same way _sync_to_desktop does
+        desktop_sid: str | None = None
+        if in_reply_to:
+            parent = store.find_by_email_message_id(in_reply_to)
+            if parent is not None:
+                desktop_sid = parent.session_id
+        if not desktop_sid:
+            if subject:
+                subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
+                desktop_sid = f"email-{sender}-{subject_hash}"
+            else:
+                desktop_sid = f"email-{sender}"
+        existing = store.get(desktop_sid)
+        if not existing:
+            return
+        msg_ids: list[str] = list(existing._email_msg_ids or [])
+        if message_id not in msg_ids:
+            msg_ids.append(message_id)
+            store.update(desktop_sid, _email_msg_ids=msg_ids)
+            logger.debug("Registered outgoing Message-ID %s in session %s", message_id, desktop_sid)
 
     def _process_media(self, event: MessageEvent) -> Optional[str]:
         """Build a media description for the agent."""
