@@ -33,6 +33,7 @@ import time
 import signal
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
+from agent_gateway.adapters.email import _normalize_subject
 from agent_gateway.core.adapter import BasePlatformAdapter
 from agent_gateway.core.config import GatewayConfig
 from agent_gateway.core.delivery import DeliveryRouter, DeliveryTarget
@@ -297,7 +298,7 @@ class GatewayRunner:
             raw = event.raw_message or {}
             in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
             sender = source.user_id.replace("@", "-").replace(".", "-")
-            subject = str(raw.get("subject", "")).strip()
+            subject = _normalize_subject(str(raw.get("subject", "")).strip())
             # Try to find existing session via In-Reply-To
             if in_reply_to:
                 parent = self._desktop_store.find_by_email_message_id(in_reply_to)
@@ -571,7 +572,7 @@ class GatewayRunner:
         raw = event.raw_message or {}
         email_message_id = raw.get("message_id") or event.message_id
         in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
-        subject = str(raw.get("subject", "")).strip()
+        subject = _normalize_subject(str(raw.get("subject", "")).strip())
         sender = source.user_id.replace("@", "-").replace(".", "-")
 
         desktop_sid: str | None = None
