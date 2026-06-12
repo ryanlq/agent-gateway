@@ -48,6 +48,63 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     from agent_gateway.cron.manager import CronManager
     cron_manager = CronManager(store, runner=runner)
 
+    # -- Migrate gateway.yaml → platform_env --------------------------------
+    # Ensure all platform configs live in one place (gateway-config.json's
+    # platform_env key) so the frontend can read/write uniformly.
+    def _migrate_yaml_to_platform_env() -> None:
+        if not runner or not hasattr(runner, "config"):
+            return
+
+        # Mapping from gateway.yaml config keys → env var names, per platform.
+        yaml_to_env: dict[str, dict[str, str]] = {
+            "email": {
+                "address": "EMAIL_ADDRESS",
+                "password": "EMAIL_PASSWORD",
+                "imap_host": "EMAIL_IMAP_HOST",
+                "imap_port": "EMAIL_IMAP_PORT",
+                "smtp_host": "EMAIL_SMTP_HOST",
+                "smtp_port": "EMAIL_SMTP_PORT",
+                "poll_interval": "EMAIL_POLL_INTERVAL",
+                "allowed_users": "EMAIL_ALLOWED_USERS",
+                "allow_all_users": "EMAIL_ALLOW_ALL_USERS",
+                "home_channel": "EMAIL_HOME_ADDRESS",
+                "skip_attachments": "EMAIL_SKIP_ATTACHMENTS",
+            },
+        }
+
+        all_env: dict[str, dict[str, str]] = store.get_config("platform_env", {})
+        changed = False
+
+        for name, mapping in yaml_to_env.items():
+            pcfg = runner.config.get_platform(name)
+            if not pcfg:
+                continue
+            extra = pcfg.extra or {}
+            platform_env = dict(all_env.get(name, {}))
+
+            for yaml_key, env_key in mapping.items():
+                # Only migrate if not already set in platform_env
+                if env_key in platform_env:
+                    continue
+                val = extra.get(yaml_key)
+                if val is not None and str(val).strip():
+                    platform_env[env_key] = str(val)
+                    changed = True
+
+            # Also migrate token → {NAME}_TOKEN
+            token_key = f"{name.upper()}_TOKEN"
+            if pcfg.token and token_key not in platform_env:
+                platform_env[token_key] = pcfg.token
+                changed = True
+
+            all_env[name] = platform_env
+
+        if changed:
+            store.set_config("platform_env", all_env)
+            logger.info("Migrated gateway.yaml config → platform_env")
+
+    _migrate_yaml_to_platform_env()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Graceful startup/shutdown: manage sessions and platform adapters."""
@@ -628,62 +685,19 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         """Persist platform env vars to gateway-config.json."""
         store.set_config("platform_env", data)
 
-    # Mapping from gateway.yaml config keys to their env var equivalents.
-    # Used to detect existing config set via YAML (not just platform_env/os.environ).
-    _YAML_TO_ENV: dict[str, dict[str, str]] = {
-        "email": {
-            "address": "EMAIL_ADDRESS",
-            "password": "EMAIL_PASSWORD",
-            "imap_host": "EMAIL_IMAP_HOST",
-            "imap_port": "EMAIL_IMAP_PORT",
-            "smtp_host": "EMAIL_SMTP_HOST",
-            "smtp_port": "EMAIL_SMTP_PORT",
-            "poll_interval": "EMAIL_POLL_INTERVAL",
-            "allowed_users": "EMAIL_ALLOWED_USERS",
-            "allow_all_users": "EMAIL_ALLOW_ALL_USERS",
-            "home_channel": "EMAIL_HOME_ADDRESS",
-        },
-    }
-
-    def _get_yaml_env(name: str) -> dict[str, str]:
-        """Read env-var-equivalent values from gateway.yaml for a platform.
-
-        Returns a dict mapping env var names to their YAML values (as strings).
-        """
-        import os
-        result: dict[str, str] = {}
-        if not runner or not hasattr(runner, "config"):
-            return result
-        pcfg = runner.config.get_platform(name)
-        if not pcfg:
-            return result
-        mapping = _YAML_TO_ENV.get(name, {})
-        extra = pcfg.extra or {}
-        for yaml_key, env_key in mapping.items():
-            val = extra.get(yaml_key)
-            if val is not None:
-                result[env_key] = str(val)
-        # Also check pcfg.token → {NAME}_TOKEN
-        if pcfg.token:
-            result[f"{name.upper()}_TOKEN"] = pcfg.token
-        return result
-
     def _build_env_vars(
         entry: Any,
         persisted: dict[str, str],
-        yaml_env: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build env_vars list for a platform entry.
 
         Combines the static ``env_var_defs`` metadata with values from
-        three sources (in priority order): persisted platform_env,
-        os.environ, and gateway.yaml config.
+        platform_env and os.environ.
         """
         import os
-        yaml = yaml_env or {}
         result: list[dict[str, Any]] = []
         for defn in getattr(entry, "env_var_defs", []):
-            value = persisted.get(defn.key) or os.environ.get(defn.key) or yaml.get(defn.key, "")
+            value = persisted.get(defn.key) or os.environ.get(defn.key, "")
             is_set = bool(value)
             if is_set and defn.is_password:
                 redacted = "••••••••"
@@ -731,14 +745,10 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
             # Persisted env vars for this platform
             platform_env = all_env.get(entry.name, {})
 
-            # Env vars from gateway.yaml config (for platforms configured
-            # before the platform_env persistence was added)
-            yaml_env = _get_yaml_env(entry.name)
-
-            # Check if required env vars are set (platform_env > os.environ > yaml)
+            # Check if required env vars are set (platform_env > os.environ)
             import os as _os
             required_set = all(
-                bool(platform_env.get(k) or _os.environ.get(k) or yaml_env.get(k))
+                bool(platform_env.get(k) or _os.environ.get(k))
                 for k in entry.required_env
             )
 
@@ -761,7 +771,7 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
                 "configured": required_set,
                 "gateway_running": runner is not None and runner._running,
                 "state": state,
-                "env_vars": _build_env_vars(entry, platform_env, yaml_env),
+                "env_vars": _build_env_vars(entry, platform_env),
                 "error_message": adapter.fatal_error_message if has_error else None,
                 "error_code": adapter.fatal_error_code if has_error else None,
             })
