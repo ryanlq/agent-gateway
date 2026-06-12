@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 from agent_gateway.core.adapter import BasePlatformAdapter
@@ -44,7 +45,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._token = config.get("token", "")
+        self._token = config.get("token") or os.getenv("DISCORD_TOKEN", "")
         self._client: Any = None
         self._name = "Discord"
 

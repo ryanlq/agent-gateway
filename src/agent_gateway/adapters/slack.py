@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 from agent_gateway.core.adapter import BasePlatformAdapter
@@ -42,8 +43,11 @@ class SlackAdapter(BasePlatformAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._bot_token = config.get("token", "")
-        self._app_token = config.get("extra", {}).get("app_token", "")
+        self._bot_token = config.get("token") or os.getenv("SLACK_TOKEN", "")
+        self._app_token = (
+            config.get("extra", {}).get("app_token")
+            or os.getenv("SLACK_APP_TOKEN", "")
+        )
         self._app: Any = None
         self._client: Any = None
         self._name = "Slack"
