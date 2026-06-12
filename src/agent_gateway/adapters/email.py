@@ -676,6 +676,37 @@ class EmailAdapter(BasePlatformAdapter):
         logger.info("[Email] Sent reply to %s (subject: %s)", to_addr, subject)
         return msg_id
 
+    def _send_new_email(
+        self,
+        to_addr: str,
+        subject: str,
+        body: str,
+    ) -> str:
+        """Send a fresh (non-reply) email via SMTP. Runs in executor thread."""
+        msg = MIMEMultipart()
+        msg["From"] = self._address
+        msg["To"] = to_addr
+        msg["Subject"] = subject
+        msg["Date"] = formatdate(localtime=True)
+        msg_id = f"<agent-gw-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
+        msg["Message-ID"] = msg_id
+
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        try:
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.login(self._address, self._password)
+            smtp.send_message(msg)
+        finally:
+            try:
+                smtp.quit()
+            except Exception:
+                smtp.close()
+
+        logger.info("[Email] Sent new email to %s (subject: %s)", to_addr, subject)
+        return msg_id
+
     async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
         """Email has no typing indicator — no-op."""
 

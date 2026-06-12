@@ -292,6 +292,76 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
         s = await sessions.create_session()
         return {"session_id": s.session_id, "branched": True}
 
+    @app.post("/api/sessions/{session_id}/handoff/email")
+    async def rest_session_handoff_email(session_id: str) -> dict[str, Any]:
+        """Send the session conversation to email for cross-platform continuation."""
+        if not runner or "email" not in runner.adapters:
+            return JSONResponse(status_code=400, content={"error": "Email adapter not available"})
+
+        email_adapter = runner.adapters["email"]
+
+        # Load session from persistent store
+        session = store.get(session_id)
+        if not session:
+            return JSONResponse(status_code=404, content={"error": "Session not found"})
+
+        # Determine recipient: EMAIL_HOME_ADDRESS > first allowed user
+        import os as _os
+        recipient = _os.environ.get("EMAIL_HOME_ADDRESS", "").strip()
+        if not recipient and email_adapter._allowed_users:
+            recipient = next(iter(email_adapter._allowed_users))
+        if not recipient:
+            return JSONResponse(status_code=400, content={"error": "No email recipient configured"})
+
+        # Format email body from session history
+        title = session.title or "Agent Session"
+        body_lines = [f"Session: {title}", ""]
+        for msg in session.history:
+            role = "You" if msg.get("role") == "user" else "Agent"
+            content = msg.get("content", "")
+            # Handle content blocks (tool calls etc.)
+            if isinstance(content, list):
+                texts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        texts.append(block.get("text", ""))
+                content = "\n".join(texts)
+            if content:
+                body_lines.append(f"[{role}]: {content}")
+                body_lines.append("")
+
+        body_lines.append("--- Reply to this email to continue the conversation. ---")
+        body = "\n".join(body_lines)
+
+        # Truncate if too long
+        if len(body) > 48_000:
+            body = body[:47_000] + "\n\n... [truncated, use the desktop app for full history]\n\n--- Reply to this email to continue the conversation. ---"
+
+        subject = f"[Agent] {title}"
+
+        # Send email via adapter (SMTP is blocking — run in executor)
+        loop = asyncio.get_running_loop()
+        message_id = await loop.run_in_executor(
+            None,
+            lambda: email_adapter._send_new_email(recipient, subject, body),
+        )
+
+        # Register in adapter threading maps
+        normalized_subject = subject.strip().lower()
+        email_adapter._thread_context[(recipient, normalized_subject)] = {
+            "subject": subject,
+            "message_id": message_id,
+        }
+        email_adapter._msg_id_to_thread[message_id] = (recipient, normalized_subject)
+
+        # Store message ID in session for In-Reply-To routing
+        msg_ids = list(session._email_msg_ids or [])
+        if message_id not in msg_ids:
+            msg_ids.append(message_id)
+        store.update(session_id, _email_msg_ids=msg_ids)
+
+        return {"ok": True, "message_id": message_id, "recipient": recipient}
+
     # -- Profiles ----------------------------------------------------------
 
     @app.get("/api/profiles")

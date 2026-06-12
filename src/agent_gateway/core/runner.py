@@ -393,7 +393,7 @@ class GatewayRunner:
             agent_type = "claude-code"
             agent_params = {}
 
-        bridge = create_bridge(agent_type, **agent_params)
+        bridge = create_bridge(agent_type, timeout=self.config.agent_timeout, **agent_params)
         # Set default cwd from hermes_config.terminal.cwd if available
         if self._desktop_store and not bridge.config.cwd:
             hermes_cfg = self._desktop_store.get_config("hermes_config", {})

@@ -46,7 +46,7 @@ def register_builtin_adapters() -> None:
 # Agent callback — bridges GatewayRunner → CLIAgentBridge
 # ---------------------------------------------------------------------------
 
-def make_agent_callback() -> Any:
+def make_agent_callback(*, agent_timeout: float = 1800.0) -> Any:
     """Create an async agent callback for the ``GatewayRunner``.
 
     The callback creates a ``CLIAgentBridge`` (claude-code / pi / codex)
@@ -69,7 +69,7 @@ def make_agent_callback() -> Any:
         from agent_gateway.server.agent_factory import create_bridge
 
         agent_type = _store.get_config("default_agent", "claude-code")
-        bridge = create_bridge(agent_type)
+        bridge = create_bridge(agent_type, timeout=agent_timeout)
         try:
             chunks: list[str] = []
             async for chunk in bridge.stream(
@@ -130,7 +130,7 @@ def try_create_runner() -> Optional[Any]:
     # Create runner with an agent callback that uses the desktop's bridge system
     runner = GatewayRunner(
         gw_config,
-        agent_callback=make_agent_callback(),
+        agent_callback=make_agent_callback(agent_timeout=gw_config.agent_timeout),
         desktop_store=None,  # Will be set in main() after sharing with app
     )
     return runner
