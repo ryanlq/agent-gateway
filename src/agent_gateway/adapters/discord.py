@@ -301,6 +301,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
 def register_discord() -> None:
     """Register the Discord adapter with the global registry."""
+    from agent_gateway.core.registry import EnvVarDef
+
     registry.register(PlatformEntry(
         name="discord",
         label="Discord",
@@ -312,4 +314,14 @@ def register_discord() -> None:
         emoji="🎮",
         platform_hint="You are on Discord. Use markdown for formatting. Keep messages under 2000 chars.",
         source="builtin",
+        env_var_defs=[
+            EnvVarDef(
+                key="DISCORD_TOKEN",
+                description="Bot token from Discord Developer Portal",
+                prompt="Enter bot token",
+                is_password=True,
+                required=True,
+                url="https://discord.com/developers/applications",
+            ),
+        ],
     ))

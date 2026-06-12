@@ -166,6 +166,8 @@ class WebhookAdapter(BasePlatformAdapter):
 
 def register_webhook() -> None:
     """Register the Webhook adapter with the global registry."""
+    from agent_gateway.core.registry import EnvVarDef
+
     registry.register(PlatformEntry(
         name="webhook",
         label="Webhook",
@@ -176,4 +178,20 @@ def register_webhook() -> None:
         emoji="🔗",
         platform_hint="You are responding via a webhook. The response will be returned as JSON.",
         source="builtin",
+        env_var_defs=[
+            EnvVarDef(
+                key="WEBHOOK_SECRET",
+                description="Secret key for verifying incoming webhook requests",
+                prompt="Enter secret",
+                is_password=True,
+                required=False,
+            ),
+            EnvVarDef(
+                key="WEBHOOK_PORT",
+                description="Port for the webhook HTTP server",
+                prompt="9120",
+                required=False,
+                advanced=True,
+            ),
+        ],
     ))

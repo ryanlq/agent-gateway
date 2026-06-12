@@ -172,6 +172,8 @@ class SlackAdapter(BasePlatformAdapter):
 
 def register_slack() -> None:
     """Register the Slack adapter with the global registry."""
+    from agent_gateway.core.registry import EnvVarDef
+
     registry.register(PlatformEntry(
         name="slack",
         label="Slack",
@@ -183,4 +185,22 @@ def register_slack() -> None:
         emoji="💼",
         platform_hint="You are on Slack. Use Slack markdown. Threaded replies are supported.",
         source="builtin",
+        env_var_defs=[
+            EnvVarDef(
+                key="SLACK_TOKEN",
+                description="Bot User OAuth Token (starts with xoxb-)",
+                prompt="xoxb-...",
+                is_password=True,
+                required=True,
+                url="https://api.slack.com/start/building/bolt",
+            ),
+            EnvVarDef(
+                key="SLACK_APP_TOKEN",
+                description="App-Level Token for Socket Mode (starts with xapp-)",
+                prompt="xapp-...",
+                is_password=True,
+                required=False,
+                url="https://api.slack.com/apis/connections/socket",
+            ),
+        ],
     ))

@@ -33,6 +33,36 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class EnvVarDef:
+    """Metadata for a single platform environment variable.
+
+    Used by the frontend messaging settings UI to render input fields,
+    show descriptions, and indicate required/optional status.
+    """
+
+    key: str
+    """Environment variable name (e.g. ``"TELEGRAM_TOKEN"``)."""
+
+    description: str = ""
+    """Human-readable description of what this variable controls."""
+
+    prompt: str = ""
+    """Placeholder text shown in the input field."""
+
+    is_password: bool = False
+    """If True, the UI treats this as a secret (masked input, redacted display)."""
+
+    required: bool = True
+    """Whether this variable must be set for the platform to function."""
+
+    advanced: bool = False
+    """If True, shown in the "Advanced" section of the UI."""
+
+    url: str = ""
+    """Link to documentation for obtaining this value."""
+
+
+@dataclass
 class PlatformEntry:
     """Metadata and factory for a single platform adapter.
 
@@ -106,6 +136,9 @@ class PlatformEntry:
 
     cron_deliver_env_var: str = ""
     """Env var name for the home channel used by cron delivery."""
+
+    env_var_defs: list[EnvVarDef] = field(default_factory=list)
+    """Detailed metadata for each environment variable (for frontend UI)."""
 
     # -- Standalone sending --------------------------------------------------
 

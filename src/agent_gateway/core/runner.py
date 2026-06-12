@@ -152,6 +152,88 @@ class GatewayRunner:
         )
 
     # ------------------------------------------------------------------
+    # Adapter lifecycle management
+    # ------------------------------------------------------------------
+
+    async def start_adapter(self, name: str, config_dict: dict[str, Any] | None = None) -> bool:
+        """Create and connect a single adapter by name.
+
+        If the adapter is already running, it is stopped first.
+        Returns True if the adapter connected successfully.
+        """
+        # Stop existing adapter if running
+        if name in self.adapters:
+            await self.stop_adapter(name)
+
+        entry = registry.get(name)
+        if entry is None:
+            logger.warning("Platform '%s' not registered — cannot start", name)
+            return False
+
+        if not entry.check_fn():
+            logger.warning("Platform '%s' dependencies not met", entry.label)
+            return False
+
+        adapter = registry.create_adapter(name, config_dict or {})
+        if adapter is None:
+            return False
+
+        # Wire up the adapter
+        adapter.set_message_handler(self._on_message)
+        adapter.set_session_store(self.session_store)
+        adapter.set_busy_session_handler(self._on_busy_session)
+
+        try:
+            connected = await adapter.connect()
+            if connected:
+                self.adapters[name] = adapter
+                # Rebuild delivery router
+                self.delivery_router = DeliveryRouter(
+                    adapters=self.adapters,
+                    filter_silence=self.config.filter_silence_narration,
+                )
+                logger.info("✅ %s started", adapter.name)
+                return True
+            else:
+                logger.error("❌ %s failed to connect", adapter.name)
+                return False
+        except Exception as exc:
+            logger.error("❌ %s connection error: %s", name, exc)
+            return False
+
+    async def stop_adapter(self, name: str) -> bool:
+        """Stop and remove a running adapter by name.
+
+        Returns True if the adapter was running and stopped successfully.
+        """
+        adapter = self.adapters.pop(name, None)
+        if adapter is None:
+            return False
+
+        try:
+            await adapter.disconnect()
+            logger.info("⏹️ %s stopped", adapter.name)
+        except Exception as exc:
+            logger.warning("Error stopping %s: %s", name, exc)
+
+        # Rebuild delivery router
+        if self.adapters:
+            self.delivery_router = DeliveryRouter(
+                adapters=self.adapters,
+                filter_silence=self.config.filter_silence_narration,
+            )
+        else:
+            self.delivery_router = None
+        return True
+
+    async def restart_adapter(self, name: str, config_dict: dict[str, Any] | None = None) -> bool:
+        """Stop and restart a single adapter.
+
+        Returns True if the adapter restarted and connected successfully.
+        """
+        return await self.start_adapter(name, config_dict)
+
+    # ------------------------------------------------------------------
     # Main message handler — injected into every adapter
     # ------------------------------------------------------------------
 

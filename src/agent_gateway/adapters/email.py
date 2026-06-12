@@ -943,6 +943,8 @@ class EmailAdapter(BasePlatformAdapter):
 
 def register_email() -> None:
     """Register the Email adapter with the global registry."""
+    from agent_gateway.core.registry import EnvVarDef
+
     registry.register(PlatformEntry(
         name="email",
         label="Email",
@@ -961,4 +963,73 @@ def register_email() -> None:
         source="builtin",
         allowed_users_env="EMAIL_ALLOWED_USERS",
         allow_all_env="EMAIL_ALLOW_ALL_USERS",
+        env_var_defs=[
+            EnvVarDef(
+                key="EMAIL_ADDRESS",
+                description="Email address for the agent",
+                prompt="agent@example.com",
+                required=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_PASSWORD",
+                description="Email password or app-specific password",
+                prompt="Enter password",
+                is_password=True,
+                required=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_IMAP_HOST",
+                description="IMAP server host",
+                prompt="imap.gmail.com",
+                required=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_SMTP_HOST",
+                description="SMTP server host",
+                prompt="smtp.gmail.com",
+                required=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_IMAP_PORT",
+                description="IMAP server port",
+                prompt="993",
+                required=False,
+                advanced=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_SMTP_PORT",
+                description="SMTP server port",
+                prompt="587",
+                required=False,
+                advanced=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_POLL_INTERVAL",
+                description="Seconds between mailbox checks",
+                prompt="15",
+                required=False,
+                advanced=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_ALLOWED_USERS",
+                description="Comma-separated list of allowed sender addresses",
+                prompt="user@example.com",
+                required=False,
+                advanced=False,
+            ),
+            EnvVarDef(
+                key="EMAIL_ALLOW_ALL_USERS",
+                description='Set to "true" to allow all senders',
+                prompt="true",
+                required=False,
+                advanced=True,
+            ),
+            EnvVarDef(
+                key="EMAIL_HOME_ADDRESS",
+                description="Home channel address for cron delivery",
+                prompt="user@example.com",
+                required=False,
+                advanced=True,
+            ),
+        ],
     ))

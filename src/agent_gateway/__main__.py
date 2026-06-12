@@ -37,9 +37,20 @@ def register_builtin_adapters() -> None:
     from agent_gateway.adapters.email import register_email
     register_email()
 
-    # Other adapters can be added here as they are ported:
-    # from agent_gateway.adapters.telegram import register_telegram
-    # register_telegram()
+    # Register other built-in adapters (gracefully skipped if deps missing)
+    for _name, _module in [
+        ("telegram", "agent_gateway.adapters.telegram"),
+        ("discord", "agent_gateway.adapters.discord"),
+        ("slack", "agent_gateway.adapters.slack"),
+        ("webhook", "agent_gateway.adapters.webhook"),
+    ]:
+        try:
+            mod = __import__(_module, fromlist=[f"register_{_name}"])
+            getattr(mod, f"register_{_name}")()
+        except ImportError:
+            logger.debug("Adapter '%s' not available (missing deps)", _name)
+        except Exception as exc:
+            logger.warning("Failed to register adapter '%s': %s", _name, exc)
 
 
 # ---------------------------------------------------------------------------

@@ -370,6 +370,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
 def register_telegram() -> None:
     """Register the Telegram adapter with the global registry."""
+    from agent_gateway.core.registry import EnvVarDef
+
     registry.register(PlatformEntry(
         name="telegram",
         label="Telegram",
@@ -381,4 +383,14 @@ def register_telegram() -> None:
         emoji="💬",
         platform_hint="You are on Telegram. Prefer concise responses. Markdown is supported.",
         source="builtin",
+        env_var_defs=[
+            EnvVarDef(
+                key="TELEGRAM_TOKEN",
+                description="Bot token from @BotFather",
+                prompt="123456:ABC-DEF...",
+                is_password=True,
+                required=True,
+                url="https://core.telegram.org/bots#how-do-i-create-a-bot",
+            ),
+        ],
     ))

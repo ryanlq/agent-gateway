@@ -620,36 +620,219 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     # -- Messaging ---------------------------------------------------------
 
+    def _get_platform_env() -> dict[str, dict[str, str]]:
+        """Read persisted platform env vars from gateway-config.json."""
+        return store.get_config("platform_env", {})
+
+    def _set_platform_env(data: dict[str, dict[str, str]]) -> None:
+        """Persist platform env vars to gateway-config.json."""
+        store.set_config("platform_env", data)
+
+    def _build_env_vars(
+        entry: Any,
+        persisted: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Build env_vars list for a platform entry.
+
+        Combines the static ``env_var_defs`` metadata with the persisted
+        values to produce the ``MessagingEnvVarInfo[]`` the frontend expects.
+        """
+        import os
+        result: list[dict[str, Any]] = []
+        for defn in getattr(entry, "env_var_defs", []):
+            value = persisted.get(defn.key, os.environ.get(defn.key, ""))
+            is_set = bool(value)
+            result.append({
+                "key": defn.key,
+                "description": defn.description,
+                "prompt": defn.prompt,
+                "is_password": defn.is_password,
+                "required": defn.required,
+                "advanced": defn.advanced,
+                "url": defn.url or None,
+                "is_set": is_set,
+                "redacted_value": "••••••••" if (is_set and defn.is_password) else None,
+            })
+        return result
+
     @app.get("/api/messaging/platforms")
     async def rest_messaging_platforms(request: Request) -> dict[str, Any]:
-        """Return status of messaging platform adapters."""
-        if runner and runner.adapters:
-            platforms = []
-            for name, adapter in runner.adapters.items():
-                connected = adapter.is_connected
-                platforms.append({
-                    "id": name,
-                    "name": adapter.name,
-                    "description": getattr(adapter, "description", adapter.name),
-                    "docs_url": getattr(adapter, "docs_url", ""),
-                    "enabled": connected,
-                    "configured": connected,
-                    "gateway_running": connected,
-                    "state": "connected" if connected else "disconnected",
-                    "env_vars": [],
-                    "error_message": adapter.fatal_error_message if adapter.has_fatal_error else None,
-                    "error_code": adapter.fatal_error_code if adapter.has_fatal_error else None,
-                })
-            return {"platforms": platforms}
-        return {"platforms": []}
+        """Return status of ALL registered messaging platforms.
+
+        Iterates the adapter registry so unconfigured platforms appear too.
+        Runtime adapter state (connected/error) is merged from ``runner.adapters``.
+        """
+        from agent_gateway.core.registry import registry as platform_registry
+
+        all_env = _get_platform_env()
+        platforms: list[dict[str, Any]] = []
+
+        for entry in platform_registry.all_entries():
+            # Runtime adapter state (if running)
+            adapter = runner.adapters.get(entry.name) if runner else None
+            is_connected = adapter.is_connected if adapter else False
+            has_error = adapter.has_fatal_error if adapter else False
+
+            # Persisted env vars for this platform
+            platform_env = all_env.get(entry.name, {})
+
+            # Check if required env vars are set
+            import os as _os
+            required_set = all(
+                bool(platform_env.get(k) or _os.environ.get(k))
+                for k in entry.required_env
+            )
+
+            # Determine state
+            if is_connected:
+                state = "connected"
+            elif has_error:
+                state = adapter.fatal_error_code if adapter else "error"
+            elif not required_set:
+                state = "not_configured"
+            else:
+                state = "disconnected"
+
+            platforms.append({
+                "id": entry.name,
+                "name": entry.label,
+                "description": entry.platform_hint[:120] if entry.platform_hint else entry.label,
+                "docs_url": "",
+                "enabled": entry.name in (runner.adapters if runner else {}),
+                "configured": required_set,
+                "gateway_running": runner is not None and runner._running,
+                "state": state,
+                "env_vars": _build_env_vars(entry, platform_env),
+                "error_message": adapter.fatal_error_message if has_error else None,
+                "error_code": adapter.fatal_error_code if has_error else None,
+            })
+
+        return {"platforms": platforms}
 
     @app.put("/api/messaging/platforms/{platform_id}")
-    async def rest_messaging_platform_update(platform_id: str) -> dict[str, Any]:
+    async def rest_messaging_platform_update(
+        platform_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Update a platform's configuration and hot-restart if needed.
+
+        Accepts ``{enabled?, env?: {...}, clear_env?: [...]}``.
+        Persists env vars to ``gateway-config.json`` and restarts the adapter.
+        """
+        from agent_gateway.core.registry import registry as platform_registry
+        import os
+
+        body = await request.json()
+        entry = platform_registry.get(platform_id)
+        if entry is None:
+            return JSONResponse({"error": f"Unknown platform: {platform_id}"}, status_code=404)
+
+        # Load current persisted env
+        all_env = _get_platform_env()
+        platform_env = dict(all_env.get(platform_id, {}))
+
+        # Apply env updates
+        new_env = body.get("env")
+        if new_env:
+            for k, v in new_env.items():
+                if v:  # skip empty values
+                    platform_env[k] = v
+                    os.environ[k] = v  # set in-process so adapter reads it
+
+        # Clear env vars
+        clear_keys = body.get("clear_env", [])
+        for k in clear_keys:
+            platform_env.pop(k, None)
+            os.environ.pop(k, None)
+
+        # Persist
+        all_env[platform_id] = platform_env
+        _set_platform_env(all_env)
+
+        # Handle enable/disable
+        enabled = body.get("enabled")
+        should_run = enabled if enabled is not None else (platform_id in (runner.adapters if runner else {}))
+
+        if not runner:
+            return {"ok": True, "platform": platform_id}
+
+        if should_run:
+            # Build config dict from persisted env vars
+            config_dict = dict(platform_env)
+            success = await runner.restart_adapter(platform_id, config_dict)
+            if not success:
+                logger.warning("Failed to restart adapter '%s'", platform_id)
+        else:
+            await runner.stop_adapter(platform_id)
+
         return {"ok": True, "platform": platform_id}
 
     @app.post("/api/messaging/platforms/{platform_id}/test")
-    async def rest_messaging_platform_test(platform_id: str) -> dict[str, Any]:
-        return {"ok": True, "connected": False}
+    async def rest_messaging_platform_test(
+        platform_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Test a platform's connection using current or provided credentials.
+
+        Creates a temporary adapter instance, calls ``connect()``, and returns
+        the result.  The temporary instance is discarded after testing.
+        """
+        from agent_gateway.core.registry import registry as platform_registry
+        import os
+
+        entry = platform_registry.get(platform_id)
+        if entry is None:
+            return {"ok": False, "message": f"Unknown platform: {platform_id}"}
+
+        # Check if deps are available
+        if not entry.check_fn():
+            return {"ok": False, "message": f"Dependencies not installed: {entry.install_hint}"}
+
+        # Load persisted env vars
+        all_env = _get_platform_env()
+        platform_env = dict(all_env.get(platform_id, {}))
+
+        # Merge with request body (test with new credentials before saving)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        test_env = body.get("env", {})
+        merged_env = {**platform_env, **test_env}
+
+        # Temporarily set env vars for adapter init
+        prev_vals: dict[str, str | None] = {}
+        for k, v in merged_env.items():
+            prev_vals[k] = os.environ.get(k)
+            if v:
+                os.environ[k] = v
+
+        try:
+            config_dict = dict(merged_env)
+            adapter = platform_registry.create_adapter(platform_id, config_dict)
+            if adapter is None:
+                return {"ok": False, "message": "Failed to create adapter instance. Check credentials."}
+
+            connected = await adapter.connect()
+            try:
+                await adapter.disconnect()
+            except Exception:
+                pass
+
+            if connected:
+                return {"ok": True, "message": f"Successfully connected to {entry.label}", "state": "connected"}
+            else:
+                return {"ok": False, "message": f"Connection to {entry.label} failed. Check credentials."}
+
+        except Exception as exc:
+            return {"ok": False, "message": f"Connection error: {exc}"}
+        finally:
+            # Restore original env vars
+            for k, prev in prev_vals.items():
+                if prev is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = prev
 
     # -- Cron --------------------------------------------------------------
 
