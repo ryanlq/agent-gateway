@@ -53,6 +53,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
         command: str = "claude",
         bare: bool = False,
         reasoning: str | None = None,
+        permission_mode: str | None = None,
+        allowed_tools: str | None = None,
     ) -> None:
         config = SubprocessConfig(
             command=[command],
@@ -66,6 +68,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
         self.command = command
         self.bare = bare
         self.reasoning = reasoning
+        self.permission_mode = permission_mode
+        self.allowed_tools = allowed_tools
 
     # -- Reasoning effort ---------------------------------------------------
 
@@ -105,6 +109,14 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # Bare mode: skip hooks, plugins, tools, CLAUDE.md auto-discovery
         if self.bare:
             args.extend(["--bare", "--disable-slash-commands", "--tools", ""])
+
+        # Permission mode (skip or auto-approve tool calls for non-interactive use)
+        if self.permission_mode and self.permission_mode != "default":
+            args.extend(["--permission-mode", self.permission_mode])
+
+        # Allowed tools whitelist
+        if self.allowed_tools:
+            args.extend(["--allowedTools", self.allowed_tools])
 
         # Add any extra user-provided args
         args.extend(self.extra_args)
@@ -187,6 +199,14 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # Bare mode: skip hooks, plugins, tools, CLAUDE.md auto-discovery
         if self.bare:
             args.extend(["--bare", "--disable-slash-commands", "--tools", ""])
+
+        # Permission mode (skip or auto-approve tool calls for non-interactive use)
+        if self.permission_mode and self.permission_mode != "default":
+            args.extend(["--permission-mode", self.permission_mode])
+
+        # Allowed tools whitelist
+        if self.allowed_tools:
+            args.extend(["--allowedTools", self.allowed_tools])
 
         args.extend(self.extra_args)
 

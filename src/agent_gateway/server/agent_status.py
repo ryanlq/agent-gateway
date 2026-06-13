@@ -46,6 +46,21 @@ _AGENT_META: dict[str, dict[str, Any]] = {
                 "max": 50,
                 "description": "最大 agentic 轮数。1=纯对话无工具，5-10=允许读文件/搜索等，50=复杂任务。",
             },
+            {
+                "key": "permission_mode",
+                "label": "Permission Mode",
+                "type": "select",
+                "options": ["default", "auto", "bypassPermissions"],
+                "default": "default",
+                "description": "工具授权模式。default=每次询问，auto=自动批准大部分操作，bypassPermissions=跳过所有检查（仅限沙箱环境）。",
+            },
+            {
+                "key": "allowed_tools",
+                "label": "Allowed Tools",
+                "type": "text",
+                "default": "",
+                "description": "允许免授权执行的工具白名单，逗号分隔。如: Bash(git *), Edit, Read。需配合 permission_mode 使用。",
+            },
         ],
     },
     "pi": {
