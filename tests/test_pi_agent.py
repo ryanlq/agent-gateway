@@ -37,10 +37,29 @@ class TestPiAgentPrintMode:
         args = bridge._build_args("s:1", "hello", [], "")
         assert args == ["pi", "--mode", "json"]
 
+    def test_build_args_with_system_extra(self):
+        """print/json modes inject system_extra via the native flag."""
+        bridge = PiAgentBridge(mode="print")
+        args = bridge._build_args("s:1", "hi", [], "Be concise")
+        assert "--append-system-prompt" in args
+        idx = args.index("--append-system-prompt")
+        assert args[idx + 1] == "Be concise"
+
+    def test_build_args_without_system_extra(self):
+        bridge = PiAgentBridge(mode="print")
+        args = bridge._build_args("s:1", "hi", [], "")
+        assert "--append-system-prompt" not in args
+
     def test_build_args_rpc(self):
         bridge = PiAgentBridge(mode="rpc")
         args = bridge._build_args("s:1", "hello", [], "")
         assert "--mode" in args and "rpc" in args
+
+    def test_build_args_rpc_excludes_system_extra_flag(self):
+        """rpc mode cannot accept CLI flags — system_extra must NOT be added."""
+        bridge = PiAgentBridge(mode="rpc")
+        args = bridge._build_args("s:1", "hi", [], "Be concise")
+        assert "--append-system-prompt" not in args
 
 
 class TestPiAgentRPCMode:
@@ -144,13 +163,15 @@ class TestPiAgentJsonStreaming:
 
 class TestPiAgentPromptFormat:
     def test_format_prompt_print_mode_with_history(self):
+        """system_extra is NOT folded into the prompt text in print mode — it
+        is injected via the --append-system-prompt flag (see _build_args)."""
         bridge = PiAgentBridge(mode="print")
         result = bridge._format_prompt(
             "message",
             [{"role": "user", "content": "prev"}],
             "system instructions",
         )
-        assert "system instructions" in result
+        assert "system instructions" not in result
         assert "prev" in result
         assert "message" in result
 
@@ -158,6 +179,13 @@ class TestPiAgentPromptFormat:
         bridge = PiAgentBridge(mode="rpc")
         result = bridge._format_prompt("hello", [], "")
         assert result == "hello"
+
+    def test_format_prompt_rpc_mode_prepends_system_extra(self):
+        """rpc mode cannot take the CLI flag, so system_extra falls back to
+        being prepended to the user message text."""
+        bridge = PiAgentBridge(mode="rpc")
+        result = bridge._format_prompt("hello", [], "Be concise")
+        assert result == "Be concise\n\nhello"
 
 
 class TestPiAgentChat:

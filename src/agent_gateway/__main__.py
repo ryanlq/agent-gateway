@@ -181,7 +181,23 @@ def main() -> None:
     # Try to set up platform adapters (email, telegram, etc.)
     runner = try_create_runner()
 
-    app = create_app(token, runner=runner)
+    # Create a shared CronManager for both the runner and the REST API.
+    # This allows agent responses to create cron jobs (via cron_tool protocol)
+    # and the REST endpoints to manage the same jobs.
+    cron_manager = None
+    try:
+        from agent_gateway.cron.manager import CronManager
+        from agent_gateway.server.session_store import SessionStore as _Store
+        cron_manager = CronManager(_Store(), runner=runner)
+    except Exception as exc:
+        logger.warning("Failed to create CronManager: %s", exc)
+
+    # Share CronManager with the runner so it can process cron operations
+    # in agent responses and handle /cron slash commands.
+    if runner and cron_manager:
+        runner.cron_manager = cron_manager
+
+    app = create_app(token, runner=runner, cron_manager=cron_manager)
 
     # Share the desktop session store with the runner so platform
     # conversations (email, etc.) are written to the same store

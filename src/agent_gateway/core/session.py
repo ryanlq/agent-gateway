@@ -241,11 +241,13 @@ class SessionStore:
         return count
 
 
-def build_session_context_prompt(session: Session) -> str:
+def build_session_context_prompt(session: Session, *, cron_enabled: bool = False) -> str:
     """Build a dynamic system prompt fragment from session metadata.
 
     Injects platform, user, and timing context so the agent is aware of
-    its conversation environment.
+    its conversation environment.  When ``cron_enabled`` is True, also
+    injects instructions for creating scheduled tasks via the
+    ``<!--CRON_OPERATION ... -->`` protocol.
     """
     from datetime import datetime
 
@@ -266,4 +268,44 @@ def build_session_context_prompt(session: Session) -> str:
     chat_type = "group" if session.thread_id or ":" in session.chat_id else "direct message"
     lines.append(f"Chat type: {chat_type}")
 
+    # Cron capabilities
+    if cron_enabled:
+        lines.append("")
+        lines.append(_CRON_CAPABILITY_PROMPT)
+
     return "\n".join(lines)
+
+
+_CRON_CAPABILITY_PROMPT = """\
+## Scheduled Task (Cron) Capabilities
+
+You can create and manage scheduled tasks (cron jobs) for the user. When the user asks you to set up a recurring task, scheduled check, reminder, or automation, include a special block in your response.
+
+### Create a scheduled task
+Include this block anywhere in your response:
+<!--CRON_OPERATION
+```json
+{"action": "create_job", "params": {"prompt": "<what the task should do>", "schedule": "<schedule>", "name": "<friendly name>"}}
+```
+-->
+
+Schedule formats:
+- Cron: `"0 9 * * *"` (daily at 9:00), `"*/30 * * * *"` (every 30 min), `"0 9 * * 1-5"` (weekdays 9:00)
+- Interval: `"every 30m"`, `"every 2h"`, `"every 1d"`
+- One-shot: `"30m"` (once in 30 min), `"2h"`, `"2026-06-14T10:00"`
+
+### Create an automation script first
+<!--CRON_OPERATION
+```json
+{"action": "create_script", "params": {"filename": "check-server.sh", "content": "#!/bin/bash\\ncurl -s http://localhost/health"}}
+```
+-->
+Then reference it: `"script": "check-server.sh"` in a create_job.
+
+### Manage existing tasks
+- List: `{"action": "list_jobs", "params": {}}`
+- Pause: `{"action": "pause_job", "params": {"job_id": "<id>"}}`
+- Resume: `{"action": "resume_job", "params": {"job_id": "<id>"}}`
+- Delete: `{"action": "delete_job", "params": {"job_id": "<id>"}}`
+
+IMPORTANT: Always include the block exactly as shown. The system will detect it and create the task automatically. You can include explanatory text before/after the block."""

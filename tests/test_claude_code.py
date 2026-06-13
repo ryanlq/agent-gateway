@@ -30,6 +30,20 @@ class TestClaudeCodeBuildArgs:
         assert "--flag" in args
         assert "value" in args
 
+    def test_build_args_with_system_extra(self):
+        """system_extra is injected via the native --append-system-prompt flag."""
+        bridge = ClaudeCodeBridge()
+        args = bridge._build_args("s:1", "hi", [], "Be concise")
+        assert "--append-system-prompt" in args
+        idx = args.index("--append-system-prompt")
+        assert args[idx + 1] == "Be concise"
+
+    def test_build_args_without_system_extra(self):
+        """No flag is added when system_extra is empty."""
+        bridge = ClaudeCodeBridge()
+        args = bridge._build_args("s:1", "hi", [], "")
+        assert "--append-system-prompt" not in args
+
     def test_max_turns(self):
         bridge = ClaudeCodeBridge()
         args = bridge._build_args("s:1", "hi", [], "")
@@ -107,13 +121,16 @@ class TestClaudeCodeHistoryFormat:
         assert "What is 2+2?" in result
 
     def test_format_prompt_with_history_and_system(self):
+        """system_extra is NOT folded into the prompt text — it is injected
+        via the --append-system-prompt flag in _build_args / stream. Only the
+        history and the user message belong in the formatted prompt here."""
         bridge = ClaudeCodeBridge()
         result = bridge._format_prompt(
             "Follow-up",
             [{"role": "user", "content": "First"}],
             "Be concise",
         )
-        assert "Be concise" in result
+        assert "Be concise" not in result
         assert "First" in result
         assert "Follow-up" in result
 

@@ -121,6 +121,13 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # Add any extra user-provided args
         args.extend(self.extra_args)
 
+        # Inject system_extra as a native system-prompt addition. Using the
+        # flag (instead of concatenating into the prompt text via
+        # _format_prompt) keeps Claude's default coding/system prompt intact
+        # and treats the extra text as a true system instruction.
+        if system_extra:
+            args.extend(["--append-system-prompt", system_extra])
+
         return args
 
     async def _parse_output(self, raw_stdout: str, session_key: str) -> str:
@@ -209,6 +216,10 @@ class ClaudeCodeBridge(CLIAgentBridge):
             args.extend(["--allowedTools", self.allowed_tools])
 
         args.extend(self.extra_args)
+
+        # Inject system_extra via the native flag (see _build_args).
+        if system_extra:
+            args.extend(["--append-system-prompt", system_extra])
 
         prompt = self._format_prompt(message, history, system_extra)
 
@@ -299,9 +310,9 @@ class ClaudeCodeBridge(CLIAgentBridge):
         """Build the full prompt for Claude Code."""
         blocks: list[str] = []
 
-        if system_extra:
-            blocks.append(f"System instructions: {system_extra}")
-
+        # system_extra is injected via the --append-system-prompt flag in
+        # _build_args / stream; do not mix it into the prompt text (that
+        # would double-inject and pollute the user message).
         history_text = self._format_history(history)
         if history_text:
             blocks.append("Previous conversation:\n" + history_text)

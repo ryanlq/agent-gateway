@@ -130,6 +130,12 @@ class PiAgentBridge(CLIAgentBridge):
             ])
 
         args.extend(self.extra_args)
+
+        # Inject system_extra via the native flag (print/json modes only).
+        # RPC mode returns early above — it cannot accept CLI flags.
+        if system_extra:
+            args.extend(["--append-system-prompt", system_extra])
+
         return args
 
     async def _parse_output(self, raw_stdout: str, session_key: str) -> str:
@@ -254,6 +260,11 @@ class PiAgentBridge(CLIAgentBridge):
             ])
 
         args.extend(self.extra_args)
+
+        # Inject system_extra via the native flag (see _build_args).
+        if system_extra:
+            args.extend(["--append-system-prompt", system_extra])
+
         prompt = self._format_prompt(message, history, system_extra)
 
         async for line in self._run_subprocess_streaming(args, input_text=prompt):
@@ -402,14 +413,20 @@ class PiAgentBridge(CLIAgentBridge):
     ) -> str:
         """Build prompt — for --print mode, just the message."""
         if self.mode == "print":
+            # system_extra is injected via the --append-system-prompt flag
+            # (see _build_args); exclude it here to avoid double injection.
             blocks: list[str] = []
-            if system_extra:
-                blocks.append(system_extra)
             history_text = self._format_history(history)
             if history_text:
                 blocks.append("Previous conversation:\n" + history_text)
             blocks.append(message)
             return "\n\n".join(blocks)
+        # json mode: stateful session (history kept by the agent), system_extra
+        # goes via the flag.
+        # rpc mode: cannot use CLI flags — fall back to prepending system_extra
+        # to the prompt text so it is at least conveyed.
+        if self.mode == "rpc" and system_extra:
+            return f"{system_extra}\n\n{message}"
         return message
 
     # -- Cleanup ------------------------------------------------------------

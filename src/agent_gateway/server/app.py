@@ -17,6 +17,7 @@ import asyncio
 import hmac
 import json
 import logging
+import time
 import uuid
 from typing import Any, Callable, Optional
 
@@ -32,12 +33,14 @@ from agent_gateway.server.session_store import SessionStore
 logger = logging.getLogger(__name__)
 
 
-def create_app(token: str, runner: Any = None) -> FastAPI:
+def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
     Args:
         token: Authentication token for WebSocket connections.
         runner: Optional ``GatewayRunner`` for platform adapters (Email, etc.).
+        cron_manager: Optional external ``CronManager`` to share with the runner.
+            When provided, the app reuses this instance instead of creating its own.
     """
 
     store = SessionStore()
@@ -45,8 +48,9 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     dispatcher = Dispatcher(sessions)
 
     # -- Cron manager -------------------------------------------------------
-    from agent_gateway.cron.manager import CronManager
-    cron_manager = CronManager(store, runner=runner)
+    if cron_manager is None:
+        from agent_gateway.cron.manager import CronManager
+        cron_manager = CronManager(store, runner=runner)
 
     # -- Migrate gateway.yaml → platform_env --------------------------------
     # Ensure all platform configs live in one place (gateway-config.json's
@@ -160,6 +164,11 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
 
     # Register RPC method handlers
     from agent_gateway.server import methods as m
+
+    # Share CronManager with the methods module so desktop client prompts
+    # get cron awareness and post-processing.
+    m._cron_manager = cron_manager
+
     dispatcher.register("session.create", m.handle_session_create)
     dispatcher.register("session.resume", m.handle_session_resume)
     dispatcher.register("session.close", m.handle_session_close)
@@ -174,6 +183,13 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
     dispatcher.register("tools.list", m.handle_tools_list)
     dispatcher.register("setup.status", m.handle_setup_status)
     dispatcher.register("setup.runtime_check", m.handle_setup_runtime_check)
+
+    # Custom prompts library (CRUD) — shared across desktop / messaging /
+    # lightweight clients; resolved into --append-system-prompt at submit time.
+    dispatcher.register("prompts.list", m.handle_prompts_list)
+    dispatcher.register("prompts.add", m.handle_prompts_add)
+    dispatcher.register("prompts.update", m.handle_prompts_update)
+    dispatcher.register("prompts.delete", m.handle_prompts_delete)
 
     # Phase 1: Core UX methods
     dispatcher.register("session.title", m.handle_session_title)
@@ -548,6 +564,64 @@ def create_app(token: str, runner: Any = None) -> FastAPI:
             clean = {k: v for k, v in config.items() if k not in ("agents", "current", "current_params")}
             store.set_config("hermes_config", clean)
         return {"ok": True}
+
+    # -- Custom prompts ---------------------------------------------------
+    # User-defined prompt snippets, stored under "custom_prompts" in
+    # gateway-config.json (same key the prompts.* RPC handlers use) so the
+    # REST and WebSocket paths share one source of truth.
+    @app.get("/api/prompts")
+    async def rest_prompts_list(request: Request) -> dict[str, Any]:
+        raw = store.get_config("custom_prompts", {}) if store else {}
+        prompts = raw if isinstance(raw, dict) else {}
+        items = [
+            {
+                "name": name,
+                "content": entry.get("content", ""),
+                "updated_at": entry.get("updated_at"),
+            }
+            for name, entry in prompts.items()
+            if isinstance(entry, dict)
+        ]
+        return {"prompts": items}
+
+    @app.post("/api/prompts")
+    async def rest_prompts_create(request: Request) -> dict[str, Any]:
+        body = await request.json() if await request.body() else {}
+        name = str(body.get("name", "")).strip()
+        content = str(body.get("content", ""))
+        if not name:
+            return {"ok": False, "error": "name is required"}
+        prompts = store.get_config("custom_prompts", {}) if store else {}
+        if not isinstance(prompts, dict):
+            prompts = {}
+        if name in prompts:
+            return {"ok": False, "error": f"prompt '{name}' already exists"}
+        prompts[name] = {"content": content, "updated_at": time.time()}
+        if store:
+            store.set_config("custom_prompts", prompts)
+        return {"ok": True, "name": name}
+
+    @app.put("/api/prompts/{name}")
+    async def rest_prompts_update(name: str, request: Request) -> dict[str, Any]:
+        body = await request.json() if await request.body() else {}
+        content = str(body.get("content", ""))
+        prompts = store.get_config("custom_prompts", {}) if store else {}
+        if not isinstance(prompts, dict):
+            prompts = {}
+        prompts[name] = {"content": content, "updated_at": time.time()}
+        if store:
+            store.set_config("custom_prompts", prompts)
+        return {"ok": True, "name": name}
+
+    @app.delete("/api/prompts/{name}")
+    async def rest_prompts_delete(name: str) -> dict[str, Any]:
+        prompts = store.get_config("custom_prompts", {}) if store else {}
+        if not isinstance(prompts, dict) or name not in prompts:
+            return {"ok": False, "error": f"prompt '{name}' not found"}
+        del prompts[name]
+        if store:
+            store.set_config("custom_prompts", prompts)
+        return {"ok": True, "name": name}
 
     # -- Model -------------------------------------------------------------
 

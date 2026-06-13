@@ -13,13 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import json
 import logging
 import os
+import re
+import time
 from typing import Any
 
 from agent_gateway.agents.base import CLIAgentError
 from agent_gateway.server.agent_status import detect_agents
 from agent_gateway.server.session_manager import SessionManager
+
+# Module-level reference to the shared CronManager, set during app startup.
+# When set, the desktop client path injects cron awareness into agent prompts
+# and post-processes responses for cron operations.
+_cron_manager: Any = None
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +170,7 @@ async def handle_prompt_submit(
     """
     session_id = params.get("session_id", "")
     text = params.get("text", "")
+    prompt_name = (params.get("system_prompt") or "").strip()
 
     if not text:
         await emit("error", {"message": "Empty prompt"}, session_id)
@@ -175,7 +184,7 @@ async def handle_prompt_submit(
 
     # Fire-and-forget: run the actual streaming in a background task
     task = asyncio.create_task(
-        _run_prompt(session_id, text, session, emit, sessions),
+        _run_prompt(session_id, text, session, emit, sessions, prompt_name=prompt_name),
     )
     _running_prompts[session_id] = task
 
@@ -194,8 +203,25 @@ async def _run_prompt(
     session: Any,
     emit: Any,
     sessions: SessionManager,
+    prompt_name: str = "",
 ) -> None:
     """Background task that streams a prompt and emits events."""
+    # Build system_extra with cron awareness if available
+    from agent_gateway.core.session import build_session_context_prompt
+    system_extra = build_session_context_prompt(
+        _make_lightweight_session(session),
+        cron_enabled=bool(_cron_manager),
+    )
+
+    # Append a user-defined custom prompt (requested via the system_prompt
+    # param on prompt.submit). Mirrors the channel_prompt merge in
+    # core/runner.py — body is resolved from the persisted custom_prompts map.
+    if prompt_name:
+        entry = _load_custom_prompts(sessions).get(prompt_name)
+        body = entry.get("content") if isinstance(entry, dict) else None
+        if body:
+            system_extra += f"\n\n{body}"
+
     # Push message.start
     await emit("message.start", {}, session_id)
 
@@ -205,7 +231,7 @@ async def _run_prompt(
             session_key=session_id,
             message=text,
             history=session.history,
-            system_extra="",
+            system_extra=system_extra,
             session_ref=session.backend_session_ref,
         ):
             full_text.append(chunk)
@@ -235,6 +261,29 @@ async def _run_prompt(
 
     response_text = "".join(full_text)
 
+    # Post-process: execute any cron operations embedded in the response
+    cron_confirm_text = ""
+    if _cron_manager and response_text:
+        try:
+            from agent_gateway.core.cron_tool import CronToolParser, CronToolExecutor
+            ops = CronToolParser.extract_operations(response_text)
+            if ops:
+                executor = CronToolExecutor(_cron_manager)
+                results = await executor.execute_all(
+                    ops, origin=None, session_key=session_id,
+                )
+                response_text = CronToolParser.replace_operations(response_text, results)
+                # Send confirmation as a follow-up message
+                for cr in results:
+                    icon = "✅" if cr.success else "❌"
+                    cron_confirm_text += f"\n{icon} {cr.message}"
+                logger.info(
+                    "Processed %d cron operation(s) for desktop session %s",
+                    len(ops), session_id,
+                )
+        except Exception as exc:
+            logger.warning("Cron tool desktop post-processing failed: %s", exc)
+
     # Update history
     session.history.append({"role": "user", "content": text})
     session.history.append({"role": "assistant", "content": response_text})
@@ -242,8 +291,25 @@ async def _run_prompt(
     # Persist to file store
     sessions.persist_session(session_id)
 
+    # Push cron confirmation as a follow-up if any operations were executed
+    if cron_confirm_text:
+        await emit("message.delta", {"text": cron_confirm_text}, session_id)
+
     # Push message.complete
     await emit("message.complete", {"text": response_text}, session_id)
+
+
+def _make_lightweight_session(desktop_session: Any):
+    """Create a lightweight Session-like object from a DesktopSession
+    for ``build_session_context_prompt()``."""
+    from agent_gateway.core.session import Session
+
+    return Session(
+        key=desktop_session.session_id,
+        platform="desktop",
+        user_id="desktop",
+        chat_id=desktop_session.session_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +493,100 @@ async def handle_session_title(
 
 
 # ---------------------------------------------------------------------------
+# Custom prompts
+# ---------------------------------------------------------------------------
+
+_CUSTOM_PROMPTS_KEY = "custom_prompts"
+
+
+def _now_ts() -> float:
+    return time.time()
+
+
+def _load_custom_prompts(sessions: SessionManager) -> dict[str, dict[str, Any]]:
+    """Read the persisted custom-prompts map: name -> {content, updated_at}."""
+    if not sessions._store:
+        return {}
+    raw = sessions._store.get_config(_CUSTOM_PROMPTS_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {name: entry for name, entry in raw.items() if isinstance(entry, dict)}
+
+
+def _save_custom_prompts(sessions: SessionManager, prompts: dict[str, dict[str, Any]]) -> None:
+    """Persist the custom-prompts map to gateway-config.json."""
+    if sessions._store:
+        sessions._store.set_config(_CUSTOM_PROMPTS_KEY, prompts)
+
+
+async def handle_prompts_list(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """List all saved custom prompts."""
+    prompts = _load_custom_prompts(sessions)
+    items = [
+        {
+            "name": name,
+            "content": entry.get("content", ""),
+            "updated_at": entry.get("updated_at"),
+        }
+        for name, entry in prompts.items()
+    ]
+    return {"prompts": items}
+
+
+async def handle_prompts_add(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Create a new custom prompt. Fails if the name already exists."""
+    name = (params.get("name") or "").strip()
+    content = params.get("content") or ""
+    if not name:
+        return {"ok": False, "error": "name is required"}
+    prompts = _load_custom_prompts(sessions)
+    if name in prompts:
+        return {"ok": False, "error": f"prompt '{name}' already exists"}
+    prompts[name] = {"content": content, "updated_at": _now_ts()}
+    _save_custom_prompts(sessions, prompts)
+    return {"ok": True, "name": name}
+
+
+async def handle_prompts_update(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Update an existing prompt's content (upsert by name)."""
+    name = (params.get("name") or "").strip()
+    content = params.get("content") or ""
+    if not name:
+        return {"ok": False, "error": "name is required"}
+    prompts = _load_custom_prompts(sessions)
+    prompts[name] = {"content": content, "updated_at": _now_ts()}
+    _save_custom_prompts(sessions, prompts)
+    return {"ok": True, "name": name}
+
+
+async def handle_prompts_delete(
+    params: dict[str, Any],
+    emit: Any,
+    sessions: SessionManager,
+) -> dict[str, Any]:
+    """Delete a custom prompt by name."""
+    name = (params.get("name") or "").strip()
+    prompts = _load_custom_prompts(sessions)
+    if name not in prompts:
+        return {"ok": False, "error": f"prompt '{name}' not found"}
+    del prompts[name]
+    _save_custom_prompts(sessions, prompts)
+    return {"ok": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
 # Slash command execution
 # ---------------------------------------------------------------------------
 
@@ -436,7 +596,246 @@ _BUILTIN_COMMANDS = {
     "reset": "Reset current session history",
     "agent": "Switch agent type: /agent <claude-code|pi|codex>",
     "help": "Show available commands",
+    "cron": "Manage cron jobs: /cron list|create|delete|pause|resume|trigger",
+    "jobs": "List cron jobs (alias for /cron list)",
+    "schedule": "Quick create: /schedule <schedule> <prompt>",
 }
+
+
+async def _handle_cron_command(
+    args: str,
+    session_id: str,
+    sessions: SessionManager,
+    emit: Any,
+) -> dict[str, Any]:
+    """Handle ``/cron`` subcommands for the desktop client.
+
+    Supports: list, create, delete, pause, resume, trigger.
+    If the first word is not a known subcommand, treats the entire input
+    as natural language and delegates to the agent to parse a schedule.
+    """
+    parts = args.split(maxsplit=1)
+    sub = parts[0].lower().strip() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("", "list", "ls"):
+        return _cron_list_result()
+
+    if sub in ("delete", "del", "rm"):
+        job_id = rest.strip()
+        if not job_id:
+            return {"warning": "Usage: /cron delete <job_id>"}
+        ok = _cron_manager.delete_job(job_id)
+        if ok:
+            return {"output": f"✅ 已删除定时任务 (ID: {job_id})"}
+        return {"warning": f"未找到任务 {job_id}"}
+
+    if sub == "pause":
+        job_id = rest.strip()
+        if not job_id:
+            return {"warning": "Usage: /cron pause <job_id>"}
+        job = _cron_manager.pause_job(job_id)
+        if job:
+            return {"output": f"⏸️ 已暂停 \"{job.get('name', job_id)}\" (ID: {job_id})"}
+        return {"warning": f"未找到任务 {job_id}"}
+
+    if sub == "resume":
+        job_id = rest.strip()
+        if not job_id:
+            return {"warning": "Usage: /cron resume <job_id>"}
+        job = _cron_manager.resume_job(job_id)
+        if job:
+            return {"output": f"▶️ 已恢复 \"{job.get('name', job_id)}\" (ID: {job_id})\n• 下次执行: {job.get('next_run_at', '?')}"}
+        return {"warning": f"未找到任务 {job_id}"}
+
+    if sub in ("trigger", "run", "exec"):
+        job_id = rest.strip()
+        if not job_id:
+            return {"warning": "Usage: /cron trigger <job_id>"}
+        job = _cron_manager.trigger_job(job_id)
+        if job:
+            return {"output": f"⚡ 已触发 \"{job.get('name', job_id)}\"，将在下次 tick 执行"}
+        return {"warning": f"未找到任务 {job_id}"}
+
+    # If 'create' is explicit, strip it; otherwise treat entire args as
+    # natural language to be parsed by the agent.
+    if sub == "create":
+        create_args = rest
+    else:
+        # Not a known subcommand — treat the whole input as natural language
+        create_args = args
+
+    return await _cron_create_from_desktop(create_args, session_id, sessions, emit)
+
+
+def _cron_list_result() -> dict[str, Any]:
+    """Build the result dict for listing cron jobs."""
+    jobs = _cron_manager.list_jobs()
+    if not jobs:
+        return {"output": "📋 当前没有任何定时任务。"}
+    lines = [f"📋 **定时任务列表** ({len(jobs)} 个):", ""]
+    for j in jobs:
+        state_icon = {
+            "scheduled": "🟢", "paused": "⏸️",
+            "completed": "✅", "error": "❌",
+        }.get(j.get("state", ""), "❓")
+        job_id = j.get("id", "?")
+        name = j.get("name", "?")
+        schedule = j.get("schedule_display", "?")
+        next_run = j.get("next_run_at", "?")
+        lines.append(
+            f"{state_icon} **{name}** (ID: `{job_id}`)\n"
+            f"   计划: {schedule} | 下次: {next_run}"
+        )
+    return {"output": "\n".join(lines)}
+
+
+async def _cron_create_from_desktop(
+    args: str,
+    session_id: str,
+    sessions: SessionManager,
+    emit: Any,
+) -> dict[str, Any]:
+    """Create a cron job from the desktop client.
+
+    Two modes:
+      1. Explicit: ``/cron "0 9 * * *" 检查服务器`` — schedule is the first arg
+      2. Natural language: ``/cron 每天早上9点检查服务器`` — agent parses schedule
+
+    Uses ``shlex.split`` to properly handle quoted schedule expressions like
+    ``"0 9 * * *"`` as a single argument.
+    """
+    if not args:
+        return {"warning": "Usage: /cron <schedule> <prompt> 或 /cron <自然语言描述>\n示例:\n  /cron \"0 9 * * *\" 检查服务器状态\n  /cron 每天早上9点提醒我打卡"}
+
+    # Use shlex to properly handle quoted schedule expressions
+    import shlex
+    try:
+        parts = shlex.split(args)
+    except ValueError:
+        # Fallback to simple split if shlex fails (e.g. unbalanced quotes)
+        parts = args.split(maxsplit=1)
+
+    if not parts:
+        return {"warning": "请提供任务描述"}
+
+    # Handle "every <duration>" as a single schedule token
+    # shlex splits "every 30m check server" → ["every", "30m", "check", "server"]
+    # but we need schedule="every 30m", prompt="check server"
+    if parts[0].lower() == "every" and len(parts) >= 2:
+        schedule = f"{parts[0]} {parts[1]}"
+        prompt = " ".join(parts[2:]).strip()
+        if prompt:
+            return _do_create_cron_job(schedule, prompt)
+        # If no prompt after schedule, fall through to agent parsing
+
+    first = parts[0].strip()
+    prompt = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+
+    explicit_schedule_patterns = [
+        r'^[\d\*\-,/]+\s+[\d\*\-,/]+\s+[\d\*\-,/]+\s+[\d\*\-,/]+\s+[\d\*\-,/]+',  # cron 5-field
+        r'^every\s+',       # "every 30m"
+        r'^\d+[mhd]$',      # "30m", "2h", "1d"
+        r'^\d{4}-\d{2}-\d{2}T',  # ISO timestamp
+    ]
+
+    is_explicit = any(re.match(p, first, re.IGNORECASE) for p in explicit_schedule_patterns)
+
+    if is_explicit and prompt:
+        # Mode 1: explicit schedule + prompt
+        return _do_create_cron_job(first, prompt)
+
+    # Mode 2: natural language — use agent to parse schedule
+    return await _cron_create_via_agent(args, session_id, sessions, emit)
+
+
+def _do_create_cron_job(schedule: str, prompt: str, name: str = None) -> dict[str, Any]:
+    """Actually create a cron job via CronManager."""
+    try:
+        job = _cron_manager.create_job(
+            prompt=prompt,
+            schedule=schedule,
+            name=name,
+            deliver="local",
+        )
+    except ValueError as e:
+        return {"warning": f"❌ 创建失败: {e}"}
+    except Exception as e:
+        return {"warning": f"❌ 创建失败: {e}"}
+
+    return {
+        "output": (
+            f"✅ 已创建定时任务 \"{job.get('name', 'cron job')}\"\n"
+            f"• ID: {job.get('id', '?')}\n"
+            f"• 计划: {job.get('schedule_display', schedule)}\n"
+            f"• 下次执行: {job.get('next_run_at', '?')}"
+        ),
+    }
+
+
+async def _cron_create_via_agent(
+    natural_language: str,
+    session_id: str,
+    sessions: SessionManager,
+    emit: Any,
+) -> dict[str, Any]:
+    """Use the agent to parse natural language into a cron schedule + prompt,
+    then create the job.
+
+    The agent receives a focused prompt and is asked to respond with a JSON
+    block containing ``schedule`` and ``prompt`` fields.
+    """
+    session = sessions.get_session(session_id)
+    if not session:
+        return {"warning": "No active session to parse schedule."}
+
+    parse_prompt = (
+        "You are a schedule parser. The user wants to create a scheduled task.\n"
+        "Parse their request into a cron schedule expression and a task prompt.\n\n"
+        "Respond with ONLY a JSON object (no markdown, no explanation):\n"
+        '{"schedule": "<schedule expression>", "prompt": "<task description>", "name": "<short name>"}\n\n'
+        "Schedule format options:\n"
+        '- Cron: "0 9 * * *" (daily at 9:00), "*/30 * * * *" (every 30 min)\n'
+        '- Interval: "every 30m", "every 2h", "every 1d"\n'
+        '- One-shot: "30m" (once in 30 min)\n\n'
+        f'User request: "{natural_language}"\n\n'
+        "JSON:"
+    )
+
+    # Use the session's bridge to parse
+    chunks: list[str] = []
+    try:
+        async for chunk in session.bridge.stream(
+            session_key=session_id,
+            message=parse_prompt,
+            history=[],
+            system_extra="",
+        ):
+            if isinstance(chunk, str):
+                chunks.append(chunk)
+    except Exception as exc:
+        return {"warning": f"Agent parsing failed: {exc}"}
+
+    raw_response = "".join(chunks).strip()
+
+    # Extract JSON from the response (agent may wrap it in markdown)
+    json_match = re.search(r'\{[^{}]*"schedule"[^{}]*\}', raw_response, re.DOTALL)
+    if not json_match:
+        return {"warning": f"Could not parse schedule from agent response: {raw_response[:200]}"}
+
+    try:
+        parsed = json.loads(json_match.group(0))
+    except json.JSONDecodeError as e:
+        return {"warning": f"Invalid JSON from agent: {e}"}
+
+    schedule = parsed.get("schedule", "").strip()
+    prompt = parsed.get("prompt", "").strip()
+    name = parsed.get("name", "").strip() or None
+
+    if not schedule or not prompt:
+        return {"warning": f"Agent did not provide schedule/prompt: {raw_response[:200]}"}
+
+    return _do_create_cron_job(schedule, prompt, name=name)
 
 
 async def handle_slash_exec(
@@ -506,6 +905,24 @@ async def handle_slash_exec(
         for name, desc in _BUILTIN_COMMANDS.items():
             lines.append(f"  /{name} — {desc}")
         return {"output": "\n".join(lines)}
+
+    # -- /cron ---------------------------------------------------------------
+    if cmd_name == "cron":
+        if not _cron_manager:
+            return {"warning": "Cron system is not available."}
+        return await _handle_cron_command(cmd_arg, session_id, sessions, emit)
+
+    # -- /jobs (alias for /cron list) ----------------------------------------
+    if cmd_name == "jobs":
+        if not _cron_manager:
+            return {"warning": "Cron system is not available."}
+        return await _handle_cron_command("list", session_id, sessions, emit)
+
+    # -- /schedule <schedule> <prompt> (alias for /cron create) --------------
+    if cmd_name == "schedule":
+        if not _cron_manager:
+            return {"warning": "Cron system is not available."}
+        return await _handle_cron_command(f"create {cmd_arg}", session_id, sessions, emit)
 
     return {"warning": f"Unknown command: /{cmd_name}"}
 

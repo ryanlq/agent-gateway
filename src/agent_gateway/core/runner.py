@@ -85,6 +85,10 @@ class GatewayRunner:
         # Signature: async (event_type: str, payload: dict, session_id: str) -> None
         self.desktop_emit: Any = None
 
+        # Cron manager — set externally via runner.cron_manager = ...
+        # When present, enables agent-driven cron job creation and /cron commands.
+        self.cron_manager: Any = None
+
         # Runtime state
         self.adapters: dict[str, BasePlatformAdapter] = {}
         self.session_store = SessionStore(
@@ -282,7 +286,9 @@ class GatewayRunner:
             user_input = f"{event.channel_context}\n\n{user_input}"
 
         # 5. Build agent context
-        context_extra = build_session_context_prompt(session)
+        context_extra = build_session_context_prompt(
+            session, cron_enabled=bool(self.cron_manager),
+        )
         if event.channel_prompt:
             context_extra += f"\n\n{event.channel_prompt}"
 
@@ -296,12 +302,36 @@ class GatewayRunner:
             logger.exception("Agent error for %s: %s", session_key, exc)
             return f"⚠️ Agent error: {exc}"
 
-        # 7. Update history
+        # 7. Post-process: execute any cron operations embedded in agent response
+        if self.cron_manager and response:
+            try:
+                from agent_gateway.core.cron_tool import CronToolParser, CronToolExecutor
+                ops = CronToolParser.extract_operations(response)
+                if ops:
+                    origin_info = {
+                        "platform": source.platform,
+                        "user_id": source.user_id,
+                        "chat_id": source.chat_id,
+                        "thread_id": source.thread_id,
+                    }
+                    executor = CronToolExecutor(self.cron_manager)
+                    results = await executor.execute_all(
+                        ops, origin=origin_info, session_key=session_key,
+                    )
+                    response = CronToolParser.replace_operations(response, results)
+                    logger.info(
+                        "Processed %d cron operation(s) for session %s",
+                        len(ops), session_key,
+                    )
+            except Exception as exc:
+                logger.warning("Cron tool post-processing failed: %s", exc)
+
+        # 8. Update history
         session.add_message("user", user_input)
         if response:
             session.add_message("assistant", response)
 
-        # 8. Sync to desktop session store so conversations appear in UI
+        # 9. Sync to desktop session store so conversations appear in UI
         if self._desktop_store and source:
             self._sync_to_desktop(source, user_input, response, event)
 
@@ -452,6 +482,41 @@ class GatewayRunner:
 
             result = await consumer.finish(full_text)
 
+            # Post-process cron operations in streaming response
+            # Note: the raw block may have been streamed to the platform already,
+            # but the confirmation will be sent as a follow-up message.
+            if self.cron_manager and full_text:
+                try:
+                    from agent_gateway.core.cron_tool import CronToolParser, CronToolExecutor
+                    ops = CronToolParser.extract_operations(full_text)
+                    if ops:
+                        origin_info = {
+                            "platform": source.platform,
+                            "user_id": source.user_id,
+                            "chat_id": source.chat_id,
+                            "thread_id": source.thread_id,
+                        }
+                        executor = CronToolExecutor(self.cron_manager)
+                        cron_results = await executor.execute_all(
+                            ops, origin=origin_info, session_key=session.key,
+                        )
+                        # Send confirmation as a follow-up message
+                        for cr in cron_results:
+                            icon = "✅" if cr.success else "❌"
+                            confirm_text = f"{icon} {cr.message}"
+                            try:
+                                await self._send_response(event, confirm_text)
+                            except Exception as send_err:
+                                logger.warning("Failed to send cron confirmation: %s", send_err)
+                        # Clean up full_text for history
+                        full_text = CronToolParser.replace_operations(full_text, cron_results)
+                        logger.info(
+                            "Processed %d cron operation(s) in streaming response",
+                            len(ops),
+                        )
+                except Exception as exc:
+                    logger.warning("Cron tool streaming post-processing failed: %s", exc)
+
             # Register the outgoing Message-ID so future In-Reply-To lookups
             # from the user's email client can find this session.
             if result and getattr(result, "success", False):
@@ -566,6 +631,9 @@ class GatewayRunner:
             "status": self._cmd_status,
             "help": self._cmd_help,
             "sessions": self._cmd_sessions,
+            "cron": self._cmd_cron,
+            "jobs": self._cmd_jobs,
+            "schedule": self._cmd_schedule,
         }
 
         handler = handlers.get(command)
@@ -593,6 +661,14 @@ class GatewayRunner:
             "/new — Reset conversation\n"
             "/status — Gateway status\n"
             "/sessions — Active sessions\n"
+            "/cron list — List cron jobs\n"
+            "/cron create <schedule> <prompt> — Create cron job\n"
+            "/cron delete <id> — Delete cron job\n"
+            "/cron pause <id> — Pause cron job\n"
+            "/cron resume <id> — Resume cron job\n"
+            "/cron trigger <id> — Trigger immediate run\n"
+            "/jobs — List cron jobs (alias)\n"
+            "/schedule <schedule> <prompt> — Quick create (alias)\n"
             "/help — This message"
         )
 
@@ -606,6 +682,169 @@ class GatewayRunner:
             last = datetime.fromtimestamp(s.last_active).strftime("%H:%M:%S")
             lines.append(f"- `{s.platform}:{s.user_id}` (last {last}, {len(s.history)} msgs)")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Cron commands
+    # ------------------------------------------------------------------
+
+    async def _cmd_cron(self, event: MessageEvent) -> str:
+        """Handle ``/cron`` subcommands: list, create, delete, pause, resume, trigger."""
+        if not self.cron_manager:
+            return "⚠️ Cron system is not available."
+
+        args = event.get_command_args().strip()
+        parts = args.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub in ("", "list", "ls"):
+            return await self._cron_list()
+        elif sub == "create":
+            return await self._cron_create(rest, event)
+        elif sub in ("delete", "del", "rm"):
+            return await self._cron_delete(rest)
+        elif sub == "pause":
+            return await self._cron_pause(rest)
+        elif sub == "resume":
+            return await self._cron_resume(rest)
+        elif sub in ("trigger", "run", "exec"):
+            return await self._cron_trigger(rest)
+        else:
+            return (
+                "⚠️ Unknown cron subcommand. Usage:\n"
+                "/cron list\n"
+                "/cron create <schedule> <prompt>\n"
+                "/cron delete <job_id>\n"
+                "/cron pause <job_id>\n"
+                "/cron resume <job_id>\n"
+                "/cron trigger <job_id>"
+            )
+
+    async def _cmd_jobs(self, event: MessageEvent) -> str:
+        """Alias for ``/cron list``."""
+        if not self.cron_manager:
+            return "⚠️ Cron system is not available."
+        return await self._cron_list()
+
+    async def _cmd_schedule(self, event: MessageEvent) -> str:
+        """Alias for ``/cron create``."""
+        if not self.cron_manager:
+            return "⚠️ Cron system is not available."
+        args = event.get_command_args().strip()
+        return await self._cron_create(args, event)
+
+    # -- Cron helpers -------------------------------------------------------
+
+    def _cron_origin(self, event: MessageEvent) -> Optional[dict]:
+        """Build origin dict from the event's source."""
+        source = event.source
+        if not source:
+            return None
+        return {
+            "platform": source.platform,
+            "user_id": source.user_id,
+            "chat_id": source.chat_id,
+            "thread_id": source.thread_id,
+        }
+
+    async def _cron_list(self) -> str:
+        jobs = self.cron_manager.list_jobs()
+        if not jobs:
+            return "📋 当前没有任何定时任务。"
+        lines = [f"📋 **定时任务列表** ({len(jobs)} 个):", ""]
+        for j in jobs:
+            state_icon = {
+                "scheduled": "🟢", "paused": "⏸️",
+                "completed": "✅", "error": "❌",
+            }.get(j.get("state", ""), "❓")
+            job_id = j.get("id", "?")
+            name = j.get("name", "?")
+            schedule = j.get("schedule_display", "?")
+            next_run = j.get("next_run_at", "?")
+            lines.append(
+                f"{state_icon} **{name}** (ID: `{job_id}`)\n"
+                f"   计划: {schedule} | 下次: {next_run}"
+            )
+        return "\n".join(lines)
+
+    async def _cron_create(self, args: str, event: MessageEvent) -> str:
+        """Parse ``<schedule> <prompt>`` and create a cron job."""
+        if not args:
+            return "⚠️ Usage: /cron create <schedule> <prompt>\n示例: /cron create \"0 9 * * *\" 检查服务器状态"
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            return "⚠️ 需要提供 schedule 和 prompt。示例: /cron create \"every 30m\" 检查磁盘空间"
+        schedule = parts[0].strip().strip('"').strip("'")
+        prompt = parts[1].strip()
+
+        origin = self._cron_origin(event)
+        # Resolve deliver target from origin
+        deliver = "local"
+        if origin:
+            p = [origin["platform"]]
+            if origin.get("chat_id"):
+                p.append(str(origin["chat_id"]))
+            if origin.get("thread_id"):
+                p.append(str(origin["thread_id"]))
+            deliver = ":".join(p)
+
+        try:
+            job = self.cron_manager.create_job(
+                prompt=prompt,
+                schedule=schedule,
+                deliver=deliver,
+                origin=origin,
+            )
+        except ValueError as e:
+            return f"❌ 创建失败: {e}"
+        except Exception as e:
+            return f"❌ 创建失败: {e}"
+
+        return (
+            f"✅ 已创建定时任务 \"{job.get('name', 'cron job')}\"\n"
+            f"• ID: {job.get('id', '?')}\n"
+            f"• 计划: {job.get('schedule_display', schedule)}\n"
+            f"• 下次执行: {job.get('next_run_at', '?')}"
+        )
+
+    async def _cron_delete(self, job_id: str) -> str:
+        job_id = job_id.strip()
+        if not job_id:
+            return "⚠️ Usage: /cron delete <job_id>"
+        ok = self.cron_manager.delete_job(job_id)
+        if ok:
+            return f"✅ 已删除定时任务 (ID: {job_id})"
+        return f"❌ 未找到任务 {job_id}"
+
+    async def _cron_pause(self, job_id: str) -> str:
+        job_id = job_id.strip()
+        if not job_id:
+            return "⚠️ Usage: /cron pause <job_id>"
+        job = self.cron_manager.pause_job(job_id)
+        if job:
+            return f"⏸️ 已暂停 \"{job.get('name', job_id)}\" (ID: {job_id})"
+        return f"❌ 未找到任务 {job_id}"
+
+    async def _cron_resume(self, job_id: str) -> str:
+        job_id = job_id.strip()
+        if not job_id:
+            return "⚠️ Usage: /cron resume <job_id>"
+        job = self.cron_manager.resume_job(job_id)
+        if job:
+            return (
+                f"▶️ 已恢复 \"{job.get('name', job_id)}\" (ID: {job_id})\n"
+                f"• 下次执行: {job.get('next_run_at', '?')}"
+            )
+        return f"❌ 未找到任务 {job_id}"
+
+    async def _cron_trigger(self, job_id: str) -> str:
+        job_id = job_id.strip()
+        if not job_id:
+            return "⚠️ Usage: /cron trigger <job_id>"
+        job = self.cron_manager.trigger_job(job_id)
+        if job:
+            return f"⚡ 已触发 \"{job.get('name', job_id)}\" (ID: {job_id})，将在下次 tick 执行"
+        return f"❌ 未找到任务 {job_id}"
 
     # ------------------------------------------------------------------
     # Helpers
