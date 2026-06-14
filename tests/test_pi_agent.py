@@ -62,6 +62,25 @@ class TestPiAgentPrintMode:
         args = bridge._build_args("s:1", "hi", [], "Be concise")
         assert "--append-system-prompt" not in args
 
+    def test_build_args_json_with_session_ref(self):
+        """json/print modes resume a native Pi session via --session <id>."""
+        bridge = PiAgentBridge(mode="json")
+        args = bridge._build_args("s:1", "hi", [], "", session_ref="pisess-1")
+        assert "--session" in args
+        assert args[args.index("--session") + 1] == "pisess-1"
+
+    def test_build_args_print_with_session_ref(self):
+        bridge = PiAgentBridge(mode="print")
+        args = bridge._build_args("s:1", "hi", [], "", session_ref="pisess-2")
+        assert "--session" in args
+        assert args[args.index("--session") + 1] == "pisess-2"
+
+    def test_build_args_rpc_ignores_session_ref(self):
+        """rpc mode keeps its own pool — session_ref must NOT be added."""
+        bridge = PiAgentBridge(mode="rpc")
+        args = bridge._build_args("s:1", "hi", [], "", session_ref="x")
+        assert "--session" not in args
+
 
 class TestPiAgentRPCMode:
     def test_rpc_creates_pool(self):
@@ -145,10 +164,20 @@ class TestPiAgentJsonStreaming:
         bridge = PiAgentBridge(mode="json")
         assert bridge._parse_json_stream_line("plain text") == "plain text"
 
-    def test_parse_json_stream_line_session_event(self):
+    def test_parse_json_stream_line_session_event_captures_id(self):
+        """The first JSONL line is the session header; its id is latched so the
+        gateway can pass --session <id> on turn 2+. The line still yields no
+        text (it's metadata, not content)."""
+        bridge = PiAgentBridge(mode="json")
+        line = json.dumps({"type": "session", "id": "0192abc", "version": 3})
+        assert bridge._parse_json_stream_line(line) == ""
+        assert bridge.captured_cli_session_id == "0192abc"
+
+    def test_parse_json_stream_line_session_event_without_id(self):
         bridge = PiAgentBridge(mode="json")
         line = json.dumps({"type": "session", "version": 3})
         assert bridge._parse_json_stream_line(line) == ""
+        assert bridge.captured_cli_session_id is None
 
     def test_parse_json_stream_line_message_end_is_skipped(self):
         """message_end is intentionally skipped during streaming: its content

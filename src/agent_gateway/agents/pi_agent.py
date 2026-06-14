@@ -78,6 +78,10 @@ class PiAgentBridge(CLIAgentBridge):
         self.extra_args = extra_args or []
         self.bare = bare
         self.reasoning = reasoning
+        # Native CLI session id captured from the first JSONL ``{"type":"session"}``
+        # line during _stream_json. Reset per stream and read by the gateway
+        # afterwards so it can pass ``--session <id>`` on turn 2+.
+        self.captured_cli_session_id: str | None = None
         self._pool: SubprocessPool | None = None
 
         if mode == "rpc":
@@ -135,6 +139,11 @@ class PiAgentBridge(CLIAgentBridge):
         # RPC mode returns early above — it cannot accept CLI flags.
         if system_extra:
             args.extend(["--append-system-prompt", system_extra])
+
+        # Native cross-process resume (deterministic; carries full tool
+        # history). Pi is file-based with no "already in use" lock.
+        if session_ref:
+            args.extend(["--session", session_ref])
 
         return args
 
@@ -230,7 +239,7 @@ class PiAgentBridge(CLIAgentBridge):
         else:
             # print mode: use base streaming (line-by-line stdout)
             args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
-            prompt = self._format_prompt(message, history, system_extra)
+            prompt = self._format_prompt(message, history, system_extra, inject_history=not session_ref)
             async for line in self._run_subprocess_streaming(args, input_text=prompt):
                 cleaned = _strip_ansi(line).strip()
                 if cleaned:
@@ -247,6 +256,9 @@ class PiAgentBridge(CLIAgentBridge):
         session_ref: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream using ``pi --mode json --print``, parsing JSONL events."""
+        # Reset the captured id for this invocation; _parse_json_stream_line
+        # fills it from the session header line.
+        self.captured_cli_session_id = None
         args = [self.command, "--mode", "json", "--print"]
 
         # Reasoning effort / thinking level
@@ -265,7 +277,15 @@ class PiAgentBridge(CLIAgentBridge):
         if system_extra:
             args.extend(["--append-system-prompt", system_extra])
 
-        prompt = self._format_prompt(message, history, system_extra)
+        # Native resume target (file-based; no "already in use" lock).
+        if session_ref:
+            args.extend(["--session", session_ref])
+
+        # Only seed flat-text history when there's no native session yet
+        # (turn 1 / reseed); from turn 2+ the CLI's own session carries it.
+        prompt = self._format_prompt(
+            message, history, system_extra, inject_history=not session_ref,
+        )
 
         async for line in self._run_subprocess_streaming(args, input_text=prompt):
             text = self._parse_json_stream_line(line)
@@ -288,6 +308,14 @@ class PiAgentBridge(CLIAgentBridge):
             return _strip_ansi(line)
 
         event_type = data.get("type", "")
+
+        # The first line of a Pi --mode json stream is the session header;
+        # latch its id so the gateway can pass --session <id> on turn 2+.
+        if event_type == "session":
+            sid = data.get("id")
+            if isinstance(sid, str) and sid:
+                self.captured_cli_session_id = sid
+            return ""
 
         # text_delta events carry incremental text
         if event_type == "message_update":
@@ -410,23 +438,31 @@ class PiAgentBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        *,
+        inject_history: bool = True,
     ) -> str:
         """Build prompt — for --print mode, just the message."""
         if self.mode == "print":
             # system_extra is injected via the --append-system-prompt flag
             # (see _build_args); exclude it here to avoid double injection.
             blocks: list[str] = []
-            history_text = self._format_history(history)
-            if history_text:
-                blocks.append("Previous conversation:\n" + history_text)
+            if inject_history:
+                history_text = self._format_history(history)
+                if history_text:
+                    blocks.append("Previous conversation:\n" + history_text)
             blocks.append(message)
             return "\n\n".join(blocks)
-        # json mode: stateful session (history kept by the agent), system_extra
-        # goes via the flag.
         # rpc mode: cannot use CLI flags — fall back to prepending system_extra
         # to the prompt text so it is at least conveyed.
         if self.mode == "rpc" and system_extra:
             return f"{system_extra}\n\n{message}"
+        # json mode: native --session carries history from turn 2+. Only on a
+        # reseed turn (no session_ref yet) do we inject prior history as text,
+        # so the first turn of a fresh session isn't contextless.
+        if inject_history:
+            history_text = self._format_history(history)
+            if history_text:
+                return "Previous conversation:\n" + history_text + "\n\n" + message
         return message
 
     # -- Cleanup ------------------------------------------------------------

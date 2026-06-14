@@ -39,7 +39,12 @@ class DesktopSession:
     created_at: float = field(default_factory=time.time)
     cwd: str | None = None
     title: str | None = None
+    # DEPRECATED legacy ref (kept for back-compat / _session_info). Not passed
+    # to the CLI.
     backend_session_ref: str | None = None
+    # The CLI's native session id, captured from turn-1 output and used as the
+    # --resume / --session target from turn 2+. None until the first turn.
+    cli_session_id: str | None = None
     status: str = "active"
     workspace_name: str | None = None
     reasoning: str | None = None
@@ -54,6 +59,7 @@ class DesktopSession:
             "title": self.title,
             "message_count": len(self.history),
             "backend_session_ref": self.backend_session_ref,
+            "cli_session_id": self.cli_session_id,
             "status": self.status,
             "workspace_name": self.workspace_name,
             "reasoning": self.reasoning,
@@ -173,10 +179,10 @@ class SessionManager:
                         bridge_params.setdefault(k, v)
         bridge = create_bridge(atype, **bridge_params)
 
-        # Generate a fresh backend_session_ref instead of reusing the
-        # persisted one — CLI tools like Claude Code lock session IDs to
-        # a single process and reject reuse with "already in use" errors.
-        new_ref = str(uuid.uuid4())
+        # Restore the captured native CLI session id (if any). Old records
+        # persisted before this field existed load as None; the next turn then
+        # re-seeds from history text and captures a fresh id (self-healing).
+        restored_cli_id = getattr(persisted, "cli_session_id", None)
 
         # Propagate cwd to the bridge so agent CLIs run in the right directory
         if persisted.workspace:
@@ -190,7 +196,8 @@ class SessionManager:
             created_at=persisted.created_at,
             cwd=persisted.workspace,
             title=persisted.title,
-            backend_session_ref=new_ref,
+            backend_session_ref=persisted.backend_session_ref,
+            cli_session_id=restored_cli_id,
             status=persisted.status,
             workspace_name=persisted.workspace_name,
             reasoning=reasoning,
@@ -262,6 +269,7 @@ class SessionManager:
             "history": s.history[-_MAX_HISTORY:],
             "message_count": len(s.history),
             "last_active": time.time(),
+            "cli_session_id": s.cli_session_id,
         }
         if s.title:
             updates["title"] = s.title

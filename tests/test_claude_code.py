@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from agent_gateway.agents.claude_code import ClaudeCodeBridge
-from agent_gateway.agents.base import CLITimeoutError, SubprocessConfig
+from agent_gateway.agents.base import CLITimeoutError
 
 
 class TestClaudeCodeBuildArgs:
@@ -48,6 +48,21 @@ class TestClaudeCodeBuildArgs:
         bridge = ClaudeCodeBridge()
         args = bridge._build_args("s:1", "hi", [], "")
         assert "--max-turns" in args
+
+    def test_build_args_with_session_ref_uses_resume(self):
+        """From turn 2+ we --resume the captured native id (not --session-id,
+        which rejects reuse with 'already in use')."""
+        bridge = ClaudeCodeBridge()
+        args = bridge._build_args("s:1", "hi", [], "", session_ref="abc")
+        assert "--resume" in args
+        assert args[args.index("--resume") + 1] == "abc"
+        assert "--session-id" not in args
+
+    def test_build_args_without_session_ref(self):
+        bridge = ClaudeCodeBridge()
+        args = bridge._build_args("s:1", "hi", [], "")
+        assert "--resume" not in args
+        assert "--session-id" not in args
 
 
 class TestClaudeCodeParseOutput:
@@ -157,6 +172,14 @@ class TestClaudeCodeStreamParsing:
         bridge = ClaudeCodeBridge()
         line = json.dumps({"type": "message_start", "message": {}})
         assert bridge._parse_stream_line(line) == ""
+
+    def test_parse_stream_line_result_captures_session_id(self):
+        """The result envelope isn't re-emitted, but its session_id is latched
+        so the gateway can --resume it next turn."""
+        bridge = ClaudeCodeBridge()
+        line = json.dumps({"type": "result", "result": "done", "session_id": "sess-42"})
+        assert bridge._parse_stream_line(line) == ""
+        assert bridge.captured_cli_session_id == "sess-42"
 
 
 class TestClaudeCodeChat:

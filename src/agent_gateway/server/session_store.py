@@ -35,7 +35,13 @@ class PersistedSession:
     title: str | None = None
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
+    # DEPRECATED: a gateway-minted UUID retained only for back-compat with old
+    # records and the _session_info payload. No longer passed to the CLI.
     backend_session_ref: str = ""
+    # The CLI's native session id (Claude --resume / Pi --session target),
+    # captured from turn-1 output. None until the first turn completes — at
+    # which point history text injection stops and native resume takes over.
+    cli_session_id: str | None = None
     workspace: str | None = None
     workspace_name: str | None = None
     model: str | None = None
@@ -282,7 +288,11 @@ class SessionStore:
             "output_tokens": 0,
             "tool_call_count": 0,
             "source": None,
-            "_lineage_root_id": None,
+            # A session is its own lineage root at creation. Branches created
+            # via session.create start independent roots today (no parent param),
+            # so the client's pin (sessionPinId, session.ts) resolves to the
+            # session id and stays stable across reloads.
+            "_lineage_root_id": session.session_id,
             "profile": "default",
             "is_default_profile": True,
         }
@@ -303,7 +313,7 @@ class SessionStore:
                 results.append(
                     {
                         "session_id": s.session_id,
-                        "lineage_root": None,
+                        "lineage_root": s.session_id,
                         "model": s.model,
                         "role": None,
                         "session_started": s.created_at,

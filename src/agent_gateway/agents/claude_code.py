@@ -25,7 +25,6 @@ from typing import Any, AsyncIterator
 
 from agent_gateway.agents.base import (
     CLIAgentBridge,
-    CLIParseError,
     SubprocessConfig,
 )
 
@@ -70,6 +69,10 @@ class ClaudeCodeBridge(CLIAgentBridge):
         self.reasoning = reasoning
         self.permission_mode = permission_mode
         self.allowed_tools = allowed_tools
+        # Native CLI session id captured from the result envelope during
+        # stream(). Reset at the start of each stream() and filled by
+        # _parse_stream_line; the gateway reads it after the stream ends.
+        self.captured_cli_session_id: str | None = None
 
     # -- Reasoning effort ---------------------------------------------------
 
@@ -99,9 +102,11 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # Allow enough turns for Claude to use tools (read files, etc.)
         args.extend(["--max-turns", str(self.max_turns)])
 
-        # Pass session ref for CLI-level session continuity
+        # Native cross-process resume (deterministic; carries full tool
+        # history). --session-id is create-once and rejects reuse, so from
+        # turn 2+ we --resume the id captured on turn 1 instead.
         if session_ref:
-            args.extend(["--session-id", session_ref])
+            args.extend(["--resume", session_ref])
 
         # Reasoning effort level
         args.extend(self._effort_args())
@@ -190,6 +195,9 @@ class ClaudeCodeBridge(CLIAgentBridge):
         Yields text deltas parsed from JSONL events.
         Requires ``--verbose`` for stream-json output.
         """
+        # Reset the captured id for this invocation; _parse_stream_line fills
+        # it from the result envelope. The gateway reads it after the stream.
+        self.captured_cli_session_id = None
         args = [self.command, "--print", "--output-format", "stream-json", "--verbose"]
 
         if self.model:
@@ -198,7 +206,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         args.extend(["--max-turns", str(self.max_turns)])
 
         if session_ref:
-            args.extend(["--session-id", session_ref])
+            args.extend(["--resume", session_ref])
 
         # Reasoning effort level
         args.extend(self._effort_args())
@@ -221,7 +229,13 @@ class ClaudeCodeBridge(CLIAgentBridge):
         if system_extra:
             args.extend(["--append-system-prompt", system_extra])
 
-        prompt = self._format_prompt(message, history, system_extra)
+        # Only inject flat-text history when there is no native session to
+        # resume from (turn 1 / reseed). Once cli_session_id is captured, the
+        # CLI's own transcript is the source of truth — replaying text here
+        # would double the context and lose tool-call structure.
+        prompt = self._format_prompt(
+            message, history, system_extra, inject_history=not session_ref,
+        )
 
         async for line in self._run_subprocess_streaming(args, input_text=prompt):
             # Try to parse as JSONL
@@ -255,6 +269,11 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # Result envelope — skip; the full text was already yielded via
         # assistant / content_block_delta events above.
         if event_type == "result":
+            # Don't re-emit the result text (already streamed above), but
+            # latch the native session id so the gateway can --resume it.
+            sid = data.get("session_id")
+            if isinstance(sid, str) and sid:
+                self.captured_cli_session_id = sid
             return ""
 
         # Assistant message — extract text from content blocks
@@ -306,6 +325,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
         message: str,
         history: list[dict[str, Any]],
         system_extra: str,
+        *,
+        inject_history: bool = True,
     ) -> str:
         """Build the full prompt for Claude Code."""
         blocks: list[str] = []
@@ -313,9 +334,10 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # system_extra is injected via the --append-system-prompt flag in
         # _build_args / stream; do not mix it into the prompt text (that
         # would double-inject and pollute the user message).
-        history_text = self._format_history(history)
-        if history_text:
-            blocks.append("Previous conversation:\n" + history_text)
+        if inject_history:
+            history_text = self._format_history(history)
+            if history_text:
+                blocks.append("Previous conversation:\n" + history_text)
 
         blocks.append(message)
 

@@ -35,6 +35,36 @@ logger = logging.getLogger(__name__)
 _running_prompts: dict[str, asyncio.Task] = {}
 
 
+def _truncate_history(history: list[dict[str, Any]], n_user: int) -> list[dict[str, Any]]:
+    """Keep the first ``n_user`` user turns and each one's immediately-following
+    assistant reply; drop everything after.
+
+    Mirrors the client's ``visibleUserOrdinal`` (count of visible user messages
+    strictly before the edit point), so ``n_user`` = number of leading
+    user/assistant pairs to retain. The incoming prompt text then becomes the
+    new ``(n_user+1)``-th user turn.
+    """
+    if n_user <= 0:
+        return []
+    kept: list[dict[str, Any]] = []
+    seen_user = 0
+    i = 0
+    while i < len(history):
+        entry = history[i]
+        if entry.get("role") == "user":
+            seen_user += 1
+            if seen_user > n_user:
+                break
+            kept.append(entry)
+            # grab the following assistant reply if present
+            if i + 1 < len(history) and history[i + 1].get("role") == "assistant":
+                kept.append(history[i + 1])
+                i += 2
+                continue
+        i += 1
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Session methods
 # ---------------------------------------------------------------------------
@@ -171,6 +201,12 @@ async def handle_prompt_submit(
     session_id = params.get("session_id", "")
     text = params.get("text", "")
     prompt_name = (params.get("system_prompt") or "").strip()
+    # Honor an edit/regenerate: drop everything from the Nth visible user
+    # message onward (the client sends this as truncate_before_user_ordinal).
+    raw_truncate = params.get("truncate_before_user_ordinal")
+    truncate_ordinal = (
+        raw_truncate if isinstance(raw_truncate, int) and raw_truncate >= 0 else None
+    )
 
     if not text:
         await emit("error", {"message": "Empty prompt"}, session_id)
@@ -184,7 +220,8 @@ async def handle_prompt_submit(
 
     # Fire-and-forget: run the actual streaming in a background task
     task = asyncio.create_task(
-        _run_prompt(session_id, text, session, emit, sessions, prompt_name=prompt_name),
+        _run_prompt(session_id, text, session, emit, sessions,
+                    prompt_name=prompt_name, truncate_ordinal=truncate_ordinal),
     )
     _running_prompts[session_id] = task
 
@@ -204,8 +241,26 @@ async def _run_prompt(
     emit: Any,
     sessions: SessionManager,
     prompt_name: str = "",
+    truncate_ordinal: int | None = None,
 ) -> None:
     """Background task that streams a prompt and emits events."""
+    # Honor an edit/regenerate: truncate history to the first N user turn-pairs
+    # and drop the native session id so this turn re-seeds from text. Append-only
+    # transcripts can't be truncated in place, so we start a fresh native session
+    # seeded by the truncated history (tool history is flattened at the edit
+    # point — an inherent CLI limitation).
+    if truncate_ordinal is not None:
+        session.history = _truncate_history(session.history, truncate_ordinal)
+        session.cli_session_id = None
+        if getattr(session.bridge, "captured_cli_session_id", None) is not None:
+            session.bridge.captured_cli_session_id = None
+
+    # What we pass to the CLI: None on turn 1 / reseed, the captured native id
+    # on turn 2+. had_ref lets us tell a dead resume (no id comes back) from a
+    # genuine first turn, so we can drop a stale id instead of looping on failure.
+    session_ref_value = session.cli_session_id
+    had_ref = session_ref_value is not None
+
     # Build system_extra with cron awareness if available
     from agent_gateway.core.session import build_session_context_prompt
     system_extra = build_session_context_prompt(
@@ -232,7 +287,7 @@ async def _run_prompt(
             message=text,
             history=session.history,
             system_extra=system_extra,
-            session_ref=session.backend_session_ref,
+            session_ref=session_ref_value,
         ):
             full_text.append(chunk)
             await emit("message.delta", {"text": chunk}, session_id)
@@ -249,6 +304,11 @@ async def _run_prompt(
         if response_text:
             session.history.append({"role": "user", "content": text})
             session.history.append({"role": "assistant", "content": response_text})
+            captured = getattr(session.bridge, "captured_cli_session_id", None)
+            if captured:
+                session.cli_session_id = captured
+            elif had_ref:
+                session.cli_session_id = None
             sessions.persist_session(session_id)
         await emit("message.complete", {"text": response_text}, session_id)
         raise
@@ -260,6 +320,16 @@ async def _run_prompt(
         await emit("error", {"message": error_msg}, session_id)
 
     response_text = "".join(full_text)
+
+    # Latch the native session id captured during the stream. If we attempted a
+    # resume but got nothing back, the CLI session is gone (e.g. user deleted
+    # ~/.claude/.../sessions/<id>) — drop the dead id so the next turn re-seeds
+    # instead of looping on a failed resume forever.
+    captured = getattr(session.bridge, "captured_cli_session_id", None)
+    if captured:
+        session.cli_session_id = captured
+    elif had_ref:
+        session.cli_session_id = None
 
     # Post-process: execute any cron operations embedded in the response
     cron_confirm_text = ""
