@@ -9,9 +9,9 @@ from agent_gateway.agents.base import CLIConnectionError
 
 
 class TestPiAgentPrintMode:
-    def test_default_is_print_mode(self):
+    def test_default_is_json_mode(self):
         bridge = PiAgentBridge()
-        assert bridge.mode == "print"
+        assert bridge.mode == "json"
         assert bridge._pool is None
 
     def test_default_command(self):
@@ -35,7 +35,8 @@ class TestPiAgentPrintMode:
     def test_build_args_json(self):
         bridge = PiAgentBridge(mode="json")
         args = bridge._build_args("s:1", "hello", [], "")
-        assert args == ["pi", "--mode", "json"]
+        # --print is required for non-interactive JSON output (see _build_args).
+        assert args == ["pi", "--mode", "json", "--print"]
 
     def test_build_args_with_system_extra(self):
         """print/json modes inject system_extra via the native flag."""
@@ -149,7 +150,12 @@ class TestPiAgentJsonStreaming:
         line = json.dumps({"type": "session", "version": 3})
         assert bridge._parse_json_stream_line(line) == ""
 
-    def test_parse_json_stream_line_message_end(self):
+    def test_parse_json_stream_line_message_end_is_skipped(self):
+        """message_end is intentionally skipped during streaming: its content
+        was already yielded incrementally via text_delta events, and Pi may
+        echo the prompt inside message_end content. Returning "" avoids
+        duplication. (Final assistant text is still recovered by
+        _extract_text_from_jsonl for the non-streaming chat() path.)"""
         bridge = PiAgentBridge(mode="json")
         line = json.dumps({
             "type": "message_end",
@@ -158,7 +164,7 @@ class TestPiAgentJsonStreaming:
                 "content": [{"type": "text", "text": "Final answer"}],
             },
         })
-        assert bridge._parse_json_stream_line(line) == "Final answer"
+        assert bridge._parse_json_stream_line(line) == ""
 
 
 class TestPiAgentPromptFormat:
