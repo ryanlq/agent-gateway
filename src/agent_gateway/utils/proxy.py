@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import os
 from typing import Optional
-from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 

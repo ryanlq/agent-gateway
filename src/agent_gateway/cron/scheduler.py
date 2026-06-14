@@ -26,9 +26,18 @@ import os
 import shutil
 import subprocess
 import sys
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Optional
+
+from agent_gateway.cron.jobs import (
+    JOBS_FILE,
+    OUTPUT_DIR,
+    advance_next_run,
+    get_due_jobs,
+    mark_job_run,
+    save_job_output,
+    _now,
+)
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -48,17 +57,6 @@ SILENT_MARKER = "[SILENT]"
 
 # Default inactivity timeout for a single cron job run (seconds).
 _DEFAULT_CRON_TIMEOUT = 600
-
-from agent_gateway.cron.jobs import (
-    JOBS_FILE,
-    OUTPUT_DIR,
-    advance_next_run,
-    get_due_jobs,
-    mark_job_run,
-    save_job_output,
-    _job_output_dir,
-    _now,
-)
 
 # =============================================================================
 # File locking
@@ -114,7 +112,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             "/bin/bash" if os.path.isfile("/bin/bash") else None
         )
         if _bash is None:
-            return False, f"Cannot run .sh/.bash script: bash not found on PATH."
+            return False, "Cannot run .sh/.bash script: bash not found on PATH."
         argv = [_bash, str(path)]
     else:
         argv = [sys.executable, str(path)]

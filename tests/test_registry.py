@@ -1,6 +1,5 @@
 """Tests for platform registry."""
 
-import pytest
 
 from agent_gateway.core.registry import PlatformEntry, PlatformRegistry
 

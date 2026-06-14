@@ -1,7 +1,5 @@
 """Tests for configuration system."""
 
-import os
-import pytest
 
 from agent_gateway.core.config import GatewayConfig, PlatformConfig, StreamingConfig, SessionConfig
 

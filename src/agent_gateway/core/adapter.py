@@ -16,16 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 from agent_gateway.core.message import (
     ChatType,
     MessageEvent,
-    MessageSource,
-    MessageType,
     SendResult,
 )
 

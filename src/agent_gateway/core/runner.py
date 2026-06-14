@@ -31,7 +31,7 @@ import hashlib
 import logging
 import time
 import signal
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from agent_gateway.adapters.email import _normalize_subject
 from agent_gateway.core.adapter import BasePlatformAdapter

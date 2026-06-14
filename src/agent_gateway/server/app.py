@@ -18,14 +18,13 @@ import hmac
 import json
 import logging
 import time
-import uuid
-from typing import Any, Callable, Optional
+from typing import Any
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
-from agent_gateway.server.agent_status import detect_agents, get_installed_agent_types
+from agent_gateway.server.agent_status import detect_agents
 from agent_gateway.server.dispatcher import Dispatcher
 from agent_gateway.server.session_manager import SessionManager
 from agent_gateway.server.session_store import SessionStore

@@ -203,7 +203,6 @@ def main() -> None:
     # conversations (email, etc.) are written to the same store
     # that the desktop server reads from.
     if runner:
-        from agent_gateway.server.session_store import SessionStore as DesktopStore
         store = app.state.desktop_store  # The store created inside create_app
         runner._desktop_store = store
 

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import os
-import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -373,7 +369,7 @@ class TestToggleSkill:
         mod._cache.clear()
 
         # Populate cache
-        r1 = scan_skills("test-agent", fake_store)
+        scan_skills("test-agent", fake_store)
         assert mod._cache.get("test-agent") is not None
 
         # Toggle should clear cache

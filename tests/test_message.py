@@ -1,6 +1,5 @@
 """Tests for core message types."""
 
-import pytest
 
 from agent_gateway.core.message import (
     ChatType,

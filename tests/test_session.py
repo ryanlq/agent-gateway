@@ -2,10 +2,9 @@
 
 import time
 
-import pytest
 
-from agent_gateway.core.message import MessageSource, ChatType
-from agent_gateway.core.session import Session, SessionStore, SessionResetPolicy
+from agent_gateway.core.message import MessageSource
+from agent_gateway.core.session import Session, SessionStore
 
 
 class TestSession:
