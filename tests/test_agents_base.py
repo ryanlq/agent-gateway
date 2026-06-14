@@ -231,9 +231,14 @@ class TestCLIAgentBridgeSubprocess:
     @pytest.mark.asyncio
     async def test_streaming_crash_raises_CLICrashError(self):
         """A non-zero exit during streaming must surface (previously silent:
-        returncode was never checked, stderr only debug-logged)."""
+        returncode was never checked, stderr only debug-logged).
+
+        The command drains stdin (``cat >/dev/null``) so procstream's arun()
+        doesn't trip its stdin-drain race — we exercise the post-loop
+        returncode check deterministically rather than the startup-crash path.
+        """
         bridge = _DummyBridge(SubprocessConfig(command=["sh"]))
-        bridge._build_args = lambda *a, **kw: ["sh", "-c", "echo partial; exit 3"]
+        bridge._build_args = lambda *a, **kw: ["sh", "-c", "cat >/dev/null; echo partial; exit 3"]
         chunks: list[str] = []
         with pytest.raises(CLICrashError) as ei:
             async for chunk in bridge.stream("s:1", "x", []):
@@ -245,9 +250,10 @@ class TestCLIAgentBridgeSubprocess:
     @pytest.mark.asyncio
     async def test_streaming_crash_surfaces_stderr(self):
         """Buffered stderr is included in the crash error so failures are
-        diagnosable, not just an opaque exit code."""
+        diagnosable, not just an opaque exit code. stdin is drained so the
+        crash deterministically reaches the post-loop returncode check."""
         bridge = _DummyBridge(SubprocessConfig(command=["sh"]))
-        bridge._build_args = lambda *a, **kw: ["sh", "-c", "echo boom details >&2; exit 7"]
+        bridge._build_args = lambda *a, **kw: ["sh", "-c", "cat >/dev/null; echo boom details >&2; exit 7"]
         with pytest.raises(CLICrashError) as ei:
             async for _ in bridge.stream("s:1", "x", []):
                 pass

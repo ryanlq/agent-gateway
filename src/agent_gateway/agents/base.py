@@ -528,13 +528,25 @@ class CLIAgentBridge(ABC):
                 "procstream is required for streaming. Install with: pip install procstream"
             )
 
-        proc = await arun(
-            args,
-            timeout=effective_timeout,
-            cwd=self.config.cwd,
-            env=env,
-            stdin=input_text or None,
-        )
+        try:
+            proc = await arun(
+                args,
+                timeout=effective_timeout,
+                cwd=self.config.cwd,
+                env=env,
+                stdin=input_text or None,
+            )
+        except OSError as exc:
+            # The child died before/while accepting stdin: procstream's arun()
+            # drains stdin before handing back a process handle, and propagates
+            # a ConnectionResetError (child exited before reading stdin — e.g.
+            # a startup/auth crash) or a FileNotFoundError (CLI binary missing)
+            # instead of returning. We never get a proc, so there's no
+            # returncode/stderr to inspect — but this is a real crash that must
+            # surface as CLICrashError, not leak to the client as a raw OSError
+            # ("unexpected error"). returncode=-1 marks "exited at startup".
+            self._logger.error("Agent process failed to start (stdin drain): %s", exc)
+            raise CLICrashError(-1, str(exc), args[0] if args else "agent") from exc
 
         total_bytes = 0
         overflow = False
@@ -559,6 +571,13 @@ class CLIAgentBridge(ABC):
             self._logger.debug("Streaming cancelled, killing subprocess")
             proc.kill()
             raise
+        except OSError as exc:
+            # The child exited abruptly (typical when it dies fast with a
+            # non-zero exit and buffered stdout); procstream surfaces this as
+            # a pipe error from stream() rather than a clean EOF. Don't let it
+            # mask the real outcome — fall through to the returncode check so a
+            # crash still surfaces as CLICrashError, not a raw ConnectionReset.
+            self._logger.debug("Agent stream pipe error (checking exit code): %s", exc)
         finally:
             await proc.wait()
 
