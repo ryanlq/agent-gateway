@@ -270,6 +270,7 @@ class SessionManager:
             "message_count": len(s.history),
             "last_active": time.time(),
             "cli_session_id": s.cli_session_id,
+            "agent_type": s.agent_type,
         }
         if s.title:
             updates["title"] = s.title

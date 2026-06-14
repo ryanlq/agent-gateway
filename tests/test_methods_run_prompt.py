@@ -235,3 +235,44 @@ async def test_running_prompt_slot_cleared_after_completion(tmp_path):
             break
         await asyncio.sleep(0)
     assert methods._running_prompts.get(sid) is None
+
+
+@pytest.mark.asyncio
+async def test_cron_parse_uses_chat_not_stream(tmp_path):
+    """Natural-language /cron parsing must use chat() (an independent
+    subprocess that never touches the capture field) — not stream(), which
+    resets/latches bridge.captured_cli_session_id and would clobber an
+    in-flight prompt turn's id (slash commands bypass the busy queue)."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    session.bridge.captured_cli_session_id = "main-turn-id"
+    calls = {"stream": 0, "chat": 0}
+
+    async def fake_stream(**kw):
+        calls["stream"] += 1
+        if False:  # pragma: no cover - must never be iterated
+            yield ""
+
+    async def fake_chat(*, session_key, message, history, system_extra, session_ref=None):
+        calls["chat"] += 1
+        return '{"schedule": "0 9 * * *", "prompt": "check server", "name": "daily"}'
+
+    session.bridge.stream = fake_stream
+    session.bridge.chat = fake_chat
+
+    class _FakeCron:
+        def create_job(self, **kw):
+            return {"id": "j1", "name": kw.get("name"),
+                    "schedule_display": kw.get("schedule"), "next_run_at": "?"}
+
+    methods._cron_manager = _FakeCron()
+    try:
+        await methods._cron_create_via_agent(
+            "每天9点检查", session.session_id, mgr, _Collector())
+    finally:
+        methods._cron_manager = None
+
+    assert calls["stream"] == 0
+    assert calls["chat"] == 1
+    # The in-flight prompt's captured id is intact.
+    assert session.bridge.captured_cli_session_id == "main-turn-id"

@@ -83,3 +83,14 @@ async def test_set_agent_same_type_preserves_cli_session_id(tmp_path):
     await mgr.set_agent(session.session_id, "claude-code")
 
     assert session.cli_session_id == "claude-native-id"
+
+
+@pytest.mark.asyncio
+async def test_persist_session_writes_agent_type(tmp_path):
+    """persist_session must write agent_type so a switch survives a gateway
+    restart (resume_session rebuilds the bridge from persisted.agent_type)."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    session.agent_type = "pi"
+    mgr.persist_session(session.session_id)
+    assert mgr._store.get(session.session_id).agent_type == "pi"

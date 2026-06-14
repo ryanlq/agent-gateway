@@ -537,15 +537,21 @@ class CLIAgentBridge(ABC):
         )
 
         total_bytes = 0
+        overflow = False
+        stderr_lines: list[str] = []
         try:
             async for line in proc.stream():
                 if line.is_stderr:
+                    # Buffer stderr (capped) so a crash report can surface it;
+                    # never yielded — it must not pollute the response stream.
+                    stderr_lines.append(line.text)
                     self._logger.debug("Agent stderr: %s", line.text[:200])
                     continue
                 total_bytes += len(line.text.encode())
                 if total_bytes > self.config.max_output_bytes:
                     self._logger.warning("Streaming output exceeded %d bytes, killing process", self.config.max_output_bytes)
                     proc.kill()
+                    overflow = True
                     break
                 if line.text:
                     yield line.text
@@ -555,6 +561,19 @@ class CLIAgentBridge(ABC):
             raise
         finally:
             await proc.wait()
+
+        # Surface crashes: the non-streaming path (chat) raises on non-zero
+        # exit, so streaming must too — otherwise a crashed/missing CLI turn
+        # reads as an empty success (returncode was never checked, stderr was
+        # only debug-logged). Only reached when the stream was fully consumed
+        # (a GeneratorExit tears the generator down and skips this). Skip when
+        # we killed the process ourselves for overflowing output (prior
+        # behavior: partial output yielded as-is).
+        rc = proc.returncode or 0
+        if rc != 0 and not overflow:
+            stderr = "".join(stderr_lines)[-4000:]
+            self._logger.error("Agent stream crashed (exit %d): %s", rc, stderr[:200])
+            raise CLICrashError(rc, stderr, args[0] if args else "agent")
 
     # -- Cleanup ------------------------------------------------------------
 

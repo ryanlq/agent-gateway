@@ -893,21 +893,20 @@ async def _cron_create_via_agent(
         "JSON:"
     )
 
-    # Use the session's bridge to parse
-    chunks: list[str] = []
+    # Use the session's bridge to parse. chat() (not stream()) deliberately:
+    # stream() resets/latches bridge.captured_cli_session_id, and this slash
+    # command can run mid-turn (the client bypasses the busy queue for slash
+    # commands), which would clobber the in-flight prompt's captured id.
+    # chat() runs an independent subprocess and never touches the capture.
     try:
-        async for chunk in session.bridge.stream(
+        raw_response = (await session.bridge.chat(
             session_key=session_id,
             message=parse_prompt,
             history=[],
             system_extra="",
-        ):
-            if isinstance(chunk, str):
-                chunks.append(chunk)
+        )).strip()
     except Exception as exc:
         return {"warning": f"Agent parsing failed: {exc}"}
-
-    raw_response = "".join(chunks).strip()
 
     # Extract JSON from the response (agent may wrap it in markdown)
     json_match = re.search(r'\{[^{}]*"schedule"[^{}]*\}', raw_response, re.DOTALL)

@@ -1,12 +1,10 @@
 """Tests for the CLI agent bridge base infrastructure."""
 
-import asyncio
 import pytest
 
 from agent_gateway.agents.base import (
     CLIAgentBridge,
     CLICrashError,
-    CLIOutputTooLargeError,
     CLITimeoutError,
     PooledProcess,
     SubprocessConfig,
@@ -222,3 +220,36 @@ class TestCLIAgentBridgeSubprocess:
     async def test_shutdown_no_pool(self):
         bridge = _DummyBridge(SubprocessConfig(command=["echo"]))
         await bridge.shutdown()  # Should be a no-op
+
+    @pytest.mark.asyncio
+    async def test_streaming_success_yields_output(self):
+        bridge = _DummyBridge(SubprocessConfig(command=["echo"]))
+        bridge._build_args = lambda *a, **kw: ["echo", "hello world"]
+        chunks = [c async for c in bridge.stream("s:1", "hello world", [])]
+        assert any("hello world" in c for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_streaming_crash_raises_CLICrashError(self):
+        """A non-zero exit during streaming must surface (previously silent:
+        returncode was never checked, stderr only debug-logged)."""
+        bridge = _DummyBridge(SubprocessConfig(command=["sh"]))
+        bridge._build_args = lambda *a, **kw: ["sh", "-c", "echo partial; exit 3"]
+        chunks: list[str] = []
+        with pytest.raises(CLICrashError) as ei:
+            async for chunk in bridge.stream("s:1", "x", []):
+                chunks.append(chunk)
+        assert ei.value.returncode == 3
+        # Partial stdout streamed before the exit is still delivered.
+        assert any("partial" in c for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_streaming_crash_surfaces_stderr(self):
+        """Buffered stderr is included in the crash error so failures are
+        diagnosable, not just an opaque exit code."""
+        bridge = _DummyBridge(SubprocessConfig(command=["sh"]))
+        bridge._build_args = lambda *a, **kw: ["sh", "-c", "echo boom details >&2; exit 7"]
+        with pytest.raises(CLICrashError) as ei:
+            async for _ in bridge.stream("s:1", "x", []):
+                pass
+        assert ei.value.returncode == 7
+        assert "boom details" in ei.value.stderr
