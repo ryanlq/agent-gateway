@@ -52,3 +52,34 @@ async def test_persist_session_writes_cli_session_id(tmp_path):
     session.cli_session_id = "xyz"
     mgr.persist_session(session.session_id)
     assert mgr._store.get(session.session_id).cli_session_id == "xyz"
+
+
+@pytest.mark.asyncio
+async def test_set_agent_different_type_resets_cli_session_id(tmp_path):
+    """Switching engines (claude-code -> pi) drops the captured native id: it
+    belongs to the previous CLI and would be a bogus --resume/--session target.
+    Persisted too, so a gateway restart doesn't reload the stale id."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    session.cli_session_id = "claude-native-id"
+    mgr.persist_session(session.session_id)
+    assert mgr._store.get(session.session_id).cli_session_id == "claude-native-id"
+
+    await mgr.set_agent(session.session_id, "pi")
+
+    assert session.agent_type == "pi"
+    assert session.cli_session_id is None
+    assert mgr._store.get(session.session_id).cli_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_set_agent_same_type_preserves_cli_session_id(tmp_path):
+    """Refreshing params on the same agent keeps the native id — the CLI
+    session is still valid for the same engine."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    session.cli_session_id = "claude-native-id"
+
+    await mgr.set_agent(session.session_id, "claude-code")
+
+    assert session.cli_session_id == "claude-native-id"

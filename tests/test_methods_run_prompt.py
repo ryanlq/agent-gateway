@@ -1,7 +1,10 @@
 """Tests for methods._run_prompt: native session capture, resume, and truncate."""
 
+import asyncio
+
 import pytest
 
+from agent_gateway.server import methods
 from agent_gateway.server.methods import _run_prompt, _truncate_history
 from agent_gateway.server.session_manager import SessionManager
 from agent_gateway.server.session_store import SessionStore
@@ -147,3 +150,88 @@ def test_truncate_history_missing_assistant_reply():
     ]
     # Keep the first user turn only; u1 has no assistant reply following it.
     assert _truncate_history(h, 1) == [{"role": "user", "content": "u1"}]
+
+
+# -- concurrency guard: one active prompt task per session ---------------
+
+async def _noop() -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submit_rejected_with_error(tmp_path):
+    """A second prompt.submit while a turn is streaming is rejected with an
+    error event (not just a status) — the client ignores response status and
+    needs the event to release its busy flag."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    sid = session.session_id
+
+    # Simulate a turn already in flight: a pending task in the registry.
+    blocker = asyncio.Event()
+
+    async def _hold() -> None:
+        await blocker.wait()
+
+    running = asyncio.create_task(_hold())
+    methods._running_prompts[sid] = running
+    try:
+        emit = _Collector()
+        result = await methods.handle_prompt_submit(
+            {"session_id": sid, "text": "hi"}, emit, mgr,
+        )
+        assert result["status"] == "busy"
+        # An error event was emitted so the client can settle.
+        assert any(e[0] == "error" for e in emit.events)
+        # The in-flight task is untouched; no second task was created.
+        assert methods._running_prompts[sid] is running
+    finally:
+        blocker.set()
+        await running
+        methods._running_prompts.pop(sid, None)
+
+
+@pytest.mark.asyncio
+async def test_done_running_task_does_not_block_new_submit(tmp_path):
+    """A finished task still in the registry (cleanup callback pending) must
+    not trip the guard — the ``.done()`` check avoids a false reject."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    sid = session.session_id
+    _stub_stream(session.bridge, ["ok"], capture_value="new-id")
+    emit = _Collector()
+
+    done_task = asyncio.create_task(_noop())
+    await done_task
+    methods._running_prompts[sid] = done_task
+    try:
+        result = await methods.handle_prompt_submit(
+            {"session_id": sid, "text": "hi"}, emit, mgr,
+        )
+        assert result["status"] == "ok"
+        new_task = methods._running_prompts[sid]
+        assert new_task is not done_task
+        await new_task
+    finally:
+        methods._running_prompts.pop(sid, None)
+
+
+@pytest.mark.asyncio
+async def test_running_prompt_slot_cleared_after_completion(tmp_path):
+    """Normal completion still evicts the slot (self-aware cleanup owns it)."""
+    mgr = _mgr(tmp_path)
+    session = await mgr.create_session(agent_type="claude-code")
+    sid = session.session_id
+    _stub_stream(session.bridge, ["done"], capture_value="x")
+    emit = _Collector()
+
+    await methods.handle_prompt_submit({"session_id": sid, "text": "hi"}, emit, mgr)
+    task = methods._running_prompts[sid]
+    assert task is not None
+    await task
+    # Yield control so the done_callback (call_soon) can run and clear the slot.
+    for _ in range(20):
+        if methods._running_prompts.get(sid) is None:
+            break
+        await asyncio.sleep(0)
+    assert methods._running_prompts.get(sid) is None

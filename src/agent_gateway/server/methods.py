@@ -218,6 +218,23 @@ async def handle_prompt_submit(
         session = await sessions.create_session()
         session_id = session.session_id
 
+    # Enforce one active prompt task per session. The desktop client already
+    # serializes via its busy guards + queue, but the server must not silently
+    # corrupt state (history / cli_session_id / bridge capture) if a second
+    # submit ever arrives mid-stream (external caller, client regression).
+    # NOTE: the client ignores the prompt.submit *response* status and drives
+    # its busy flag purely off events, so we MUST emit an "error" event — a
+    # bare {"status":"busy"} return would leave the client hung on busy=true.
+    existing = _running_prompts.get(session_id)
+    if existing is not None and not existing.done():
+        await emit(
+            "error",
+            {"message": "A response is still streaming for this session; "
+                        "wait for it to finish or stop it first."},
+            session_id,
+        )
+        return {"status": "busy", "message": "session busy"}
+
     # Fire-and-forget: run the actual streaming in a background task
     task = asyncio.create_task(
         _run_prompt(session_id, text, session, emit, sessions,
@@ -226,7 +243,11 @@ async def handle_prompt_submit(
     _running_prompts[session_id] = task
 
     def _cleanup(t: asyncio.Task, sid: str = session_id) -> None:
-        _running_prompts.pop(sid, None)
+        # Only evict if this task still owns the slot. A newer submit may have
+        # replaced the entry before this callback runs; popping unconditionally
+        # would orphan the newer (still-running) task and break interrupt.
+        if _running_prompts.get(sid) is t:
+            _running_prompts.pop(sid, None)
 
     task.add_done_callback(_cleanup)
 

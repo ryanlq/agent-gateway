@@ -309,11 +309,20 @@ class SessionManager:
             all_params: dict[str, dict] = self._store.get_config("agent_params", {})
             if isinstance(all_params, dict):
                 agent_params = all_params.get(agent_type)
+        previous_type = session.agent_type
         session.agent_type = agent_type
         session.bridge = create_bridge(agent_type, **(agent_params or {}))
         # Preserve cwd from session when switching agents
         if session.cwd:
             session.bridge.config.cwd = session.cwd
+        # A captured native CLI session id belongs to the previous agent's
+        # CLI; switching engines (e.g. claude-code <-> pi) invalidates it.
+        # Drop it so the next turn re-seeds from text history (the new agent
+        # gets a recap, then captures its own fresh id). Same-agent param
+        # refreshes keep the id — the native session is still valid.
+        if previous_type != agent_type:
+            session.cli_session_id = None
+            self.persist_session(session_id)
         # Persist agent params per-agent
         if agent_params and self._store:
             all_params: dict[str, dict] = self._store.get_config("agent_params", {})
