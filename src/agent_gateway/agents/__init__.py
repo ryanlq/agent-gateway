@@ -5,7 +5,6 @@ gateway's agent interface.
 Bridges available:
 
   - ``ClaudeCodeBridge`` — Anthropic Claude Code CLI (``claude --print``)
-  - ``CodexBridge`` — OpenAI Codex CLI (``codex``)
   - ``PiAgentBridge`` — Pi Agent RPC mode (``pi --mode rpc``)
 
 Usage::
@@ -30,14 +29,12 @@ from agent_gateway.agents.base import (
     SubprocessPool,
 )
 from agent_gateway.agents.claude_code import ClaudeCodeBridge
-from agent_gateway.agents.codex import CodexBridge
 from agent_gateway.agents.pi_agent import PiAgentBridge
 
 __all__ = [
     # Bridges
     "CLIAgentBridge",
     "ClaudeCodeBridge",
-    "CodexBridge",
     "PiAgentBridge",
     # Infrastructure
     "SubprocessConfig",

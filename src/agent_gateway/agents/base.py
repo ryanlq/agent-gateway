@@ -2,7 +2,7 @@
 CLI Agent Bridge — base classes, subprocess pool, and exception hierarchy.
 
 Provides the infrastructure for wrapping subprocess-based CLI agent tools
-(Claude Code, OpenAI Codex, Pi Agent) into the async callable interface
+(Claude Code, Pi Agent) into the async callable interface
 that ``GatewayRunner`` expects.
 
 Usage::
@@ -140,8 +140,8 @@ class SubprocessPool:
     Manages per-session persistent subprocess instances.
 
     Used by stateful CLI tools (e.g. Pi Agent RPC mode) that maintain a
-    conversation over a long-lived process.  Stateless tools (Claude Code,
-    Codex) use ``CLIAgentBridge._run_subprocess`` directly instead.
+    conversation over a long-lived process.  Stateless tools (Claude Code)
+    use ``CLIAgentBridge._run_subprocess`` directly instead.
     """
 
     def __init__(self, config: SubprocessConfig) -> None:

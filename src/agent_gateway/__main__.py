@@ -60,7 +60,7 @@ def register_builtin_adapters() -> None:
 def make_agent_callback(*, agent_timeout: float = 1800.0) -> Any:
     """Create an async agent callback for the ``GatewayRunner``.
 
-    The callback creates a ``CLIAgentBridge`` (claude-code / pi / codex)
+    The callback creates a ``CLIAgentBridge`` (claude-code / pi)
     based on the default agent type stored in ``~/.nexus-agent/gateway-config.json``
     and calls it to produce a response.
     """

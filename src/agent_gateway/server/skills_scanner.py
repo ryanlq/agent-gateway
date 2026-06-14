@@ -7,7 +7,6 @@ and returns skill metadata matching the desktop client's ``SkillInfo`` interface
 Supported agents:
   - claude-code: ``~/.claude/skills/``
   - pi:          ``~/.pi/agent/skills/``
-  - codex:       (no skills concept)
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ logger = logging.getLogger(__name__)
 _SKILLS_DIR_MAP: dict[str, Any] = {
     "claude-code": lambda: Path.home() / ".claude" / "skills",
     "pi": lambda: Path.home() / ".pi" / "agent" / "skills",
-    # codex has no skills concept
 }
 
 # ---------------------------------------------------------------------------

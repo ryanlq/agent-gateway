@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 _AGENT_REGISTRY: dict[str, str] = {
     "claude-code": "agent_gateway.agents.claude_code:ClaudeCodeBridge",
     "pi": "agent_gateway.agents.pi_agent:PiAgentBridge",
-    "codex": "agent_gateway.agents.codex:CodexBridge",
 }
 
 
@@ -57,7 +56,7 @@ def create_bridge(agent_type: str, **kwargs: object) -> CLIAgentBridge:
     Parameters
     ----------
     agent_type :
-        One of ``"claude-code"``, ``"pi"``, ``"codex"``.
+        One of ``"claude-code"``, ``"pi"``.
     **kwargs :
         Forwarded to the bridge constructor (with automatic type coercion).
 
