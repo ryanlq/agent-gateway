@@ -156,7 +156,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         except Exception as exc:
             logger.error("Error during shutdown: %s", exc)
 
-    app = FastAPI(title="Agent Gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Agent Gateway", version="0.4.0", lifespan=lifespan)
 
     # Expose store on app.state so the runner can share the same instance
     app.state.desktop_store = store
@@ -216,7 +216,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         """Readiness probe — Electron polls this until it returns 200."""
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": "0.4.0",
             "active_sessions": len(sessions.list_sessions()),
             "auth_required": bool(token),
         }
@@ -1180,7 +1180,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
                 logger.debug("Failed to send event (client disconnected?)")
 
         # Send gateway.ready immediately
-        await emit("gateway.ready", {"server": "agent-gateway", "version": "0.1.0"})
+        await emit("gateway.ready", {"server": "agent-gateway", "version": "0.4.0"})
 
         # Wire runner's desktop_emit so platform messages (email, etc.)
         # also push streaming events to the desktop client.
