@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
 
 class CLIAgentError(Exception):
     """Base exception for CLI agent errors."""
@@ -84,6 +85,7 @@ class CLIConnectionError(CLIAgentError):
 # SubprocessConfig
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SubprocessConfig:
     """Configuration for CLI subprocess management."""
@@ -91,7 +93,7 @@ class SubprocessConfig:
     command: list[str]
     """CLI command and fixed arguments, e.g. ``["claude", "--print"]``."""
 
-    timeout: float = 120.0
+    timeout: float = 1200.0
     """Max seconds per invocation."""
 
     max_output_bytes: int = 1_000_000
@@ -114,6 +116,7 @@ class SubprocessConfig:
 # PooledProcess — tracks a persistent subprocess
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PooledProcess:
     """A persistent subprocess tracked in the pool."""
@@ -134,6 +137,7 @@ class PooledProcess:
 # ---------------------------------------------------------------------------
 # SubprocessPool
 # ---------------------------------------------------------------------------
+
 
 class SubprocessPool:
     """
@@ -224,10 +228,7 @@ class SubprocessPool:
 
     async def cleanup_idle(self) -> int:
         """Terminate processes idle beyond ``idle_timeout``. Returns count."""
-        expired = [
-            key for key, pp in self._pool.items()
-            if pp.is_idle(self.config.idle_timeout)
-        ]
+        expired = [key for key, pp in self._pool.items() if pp.is_idle(self.config.idle_timeout)]
         for key in expired:
             await self.terminate(key)
         return len(expired)
@@ -296,6 +297,7 @@ class SubprocessPool:
 # CLIAgentBridge — abstract base for all CLI agent bridges
 # ---------------------------------------------------------------------------
 
+
 class CLIAgentBridge(ABC):
     """
     Abstract base class for wrapping CLI agent tools into the gateway's
@@ -333,12 +335,15 @@ class CLIAgentBridge(ABC):
         Spawns a subprocess, sends the formatted prompt, and returns
         the parsed response string.
         """
-        args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
+        args = self._build_args(
+            session_key, message, history, system_extra, session_ref=session_ref
+        )
         prompt = self._format_prompt(message, history, system_extra)
 
         try:
             stdout, stderr, returncode = await self._run_subprocess(
-                args, input_text=prompt,
+                args,
+                input_text=prompt,
             )
         except CLITimeoutError as exc:
             self._logger.error("Timeout: %s", exc)
@@ -375,7 +380,9 @@ class CLIAgentBridge(ABC):
 
         Yields incremental text chunks from subprocess stdout.
         """
-        args = self._build_args(session_key, message, history, system_extra, session_ref=session_ref)
+        args = self._build_args(
+            session_key, message, history, system_extra, session_ref=session_ref
+        )
         prompt = self._format_prompt(message, history, system_extra)
 
         async for chunk in self._run_subprocess_streaming(args, input_text=prompt):
@@ -383,6 +390,7 @@ class CLIAgentBridge(ABC):
 
     def as_callback(self) -> Callable[..., Awaitable[str]]:
         """Return an async callable for ``GatewayRunner(agent_callback=...)``."""
+
         async def _callback(**kwargs: Any) -> str:
             return await self.chat(
                 session_key=kwargs.get("session_key", ""),
@@ -390,6 +398,7 @@ class CLIAgentBridge(ABC):
                 history=kwargs.get("history", []),
                 system_extra=kwargs.get("system_extra", ""),
             )
+
         return _callback
 
     # -- Subclass hooks (abstract) -----------------------------------------
@@ -495,7 +504,9 @@ class CLIAgentBridge(ABC):
         returncode = proc.returncode or 0
         self._logger.debug(
             "CLI finished (exit %d, stdout %d bytes, stderr %d bytes)",
-            returncode, len(stdout_bytes), len(stderr_bytes),
+            returncode,
+            len(stdout_bytes),
+            len(stderr_bytes),
         )
 
         return stdout, stderr, returncode
@@ -561,7 +572,10 @@ class CLIAgentBridge(ABC):
                     continue
                 total_bytes += len(line.text.encode())
                 if total_bytes > self.config.max_output_bytes:
-                    self._logger.warning("Streaming output exceeded %d bytes, killing process", self.config.max_output_bytes)
+                    self._logger.warning(
+                        "Streaming output exceeded %d bytes, killing process",
+                        self.config.max_output_bytes,
+                    )
                     proc.kill()
                     overflow = True
                     break

@@ -19,7 +19,7 @@ from agent_gateway.agents.base import (
 class TestSubprocessConfig:
     def test_defaults(self):
         cfg = SubprocessConfig(command=["echo"])
-        assert cfg.timeout == 120.0
+        assert cfg.timeout == 1200.0
         assert cfg.max_output_bytes == 1_000_000
         assert cfg.idle_timeout == 300.0
         assert cfg.max_concurrent == 10
@@ -223,8 +223,12 @@ class TestCLIAgentBridgeSubprocess:
 
     @pytest.mark.asyncio
     async def test_streaming_success_yields_output(self):
-        bridge = _DummyBridge(SubprocessConfig(command=["echo"]))
-        bridge._build_args = lambda *a, **kw: ["echo", "hello world"]
+        # Drain stdin (cat >/dev/null) like the crash-path tests below —
+        # otherwise procstream's arun() trips its stdin-drain race against
+        # ``echo`` (which exits without reading stdin) and raises CLICrashError
+        # instead of yielding. This exercises the deterministic success path.
+        bridge = _DummyBridge(SubprocessConfig(command=["sh"]))
+        bridge._build_args = lambda *a, **kw: ["sh", "-c", "cat >/dev/null; echo hello world"]
         chunks = [c async for c in bridge.stream("s:1", "hello world", [])]
         assert any("hello world" in c for c in chunks)
 

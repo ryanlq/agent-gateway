@@ -46,7 +46,7 @@ class ClaudeCodeBridge(CLIAgentBridge):
         *,
         model: str | None = None,
         max_turns: int = 10,
-        timeout: float = 120.0,
+        timeout: float = 1200.0,
         max_output_bytes: int = 2_000_000,
         extra_args: list[str] | None = None,
         command: str = "claude",
@@ -169,7 +169,8 @@ class ClaudeCodeBridge(CLIAgentBridge):
                     content = data["content"]
                     if isinstance(content, list):
                         texts = [
-                            b.get("text", "") for b in content
+                            b.get("text", "")
+                            for b in content
                             if isinstance(b, dict) and b.get("type") == "text"
                         ]
                         return "\n".join(texts)
@@ -234,7 +235,10 @@ class ClaudeCodeBridge(CLIAgentBridge):
         # CLI's own transcript is the source of truth — replaying text here
         # would double the context and lose tool-call structure.
         prompt = self._format_prompt(
-            message, history, system_extra, inject_history=not session_ref,
+            message,
+            history,
+            system_extra,
+            inject_history=not session_ref,
         )
 
         async for line in self._run_subprocess_streaming(args, input_text=prompt):
