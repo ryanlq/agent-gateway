@@ -54,6 +54,25 @@ class PersistedSession:
     reasoning: str | None = None
     fast: str | None = None
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "PersistedSession":
+        """Construct from a raw on-disk dict, tolerating unknown keys.
+
+        Forward version skew (a newer gateway wrote fields this build doesn't
+        know about) silently drops the unknown keys instead of raising
+        TypeError. Known-but-missing keys fall back to their dataclass defaults.
+        """
+        known = cls.__dataclass_fields__
+        filtered = {k: v for k, v in raw.items() if k in known}
+        dropped = set(raw) - set(filtered)
+        if dropped:
+            logger.debug(
+                "PersistedSession ignoring unknown fields for %s: %s",
+                raw.get("session_id"),
+                sorted(dropped),
+            )
+        return cls(**filtered)
+
 
 class SessionStore:
     """File-backed session store.
@@ -92,16 +111,21 @@ class SessionStore:
             raw = self._file.read_text(encoding="utf-8")
             data = json.loads(raw)
             if isinstance(data, dict):
-                # Filter out soft-deleted sessions that are older than 30 days
+                # Filter out soft-deleted sessions older than 30 days, and skip
+                # any non-dict entry (corrupt/foreign shape) so one bad record
+                # can't brick the whole store with an AttributeError → 500.
                 cutoff = time.time() - 30 * 86400
-                return {
-                    k: v
-                    for k, v in data.items()
-                    if not (
-                        v.get("status") == "deleted"
-                        and v.get("last_active", 0) < cutoff
-                    )
-                }
+                out: dict[str, dict[str, Any]] = {}
+                for k, v in data.items():
+                    if not isinstance(v, dict):
+                        logger.warning(
+                            "Skipping non-dict session entry %r in %s", k, self._file
+                        )
+                        continue
+                    if v.get("status") == "deleted" and v.get("last_active", 0) < cutoff:
+                        continue
+                    out[k] = v
+                return out
             return {}
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to load sessions from %s: %s", self._file, exc)
@@ -162,7 +186,7 @@ class SessionStore:
         raw = self._data.get(session_id)
         if raw is None:
             return None
-        return PersistedSession(**raw)
+        return PersistedSession.from_dict(raw)
 
     def list_sessions(
         self,
@@ -177,7 +201,7 @@ class SessionStore:
         """List sessions matching criteria. Returns (sessions, total_count)."""
         candidates: list[PersistedSession] = []
         for raw in self._data.values():
-            s = PersistedSession(**raw)
+            s = PersistedSession.from_dict(raw)
             if s.status == "deleted":
                 continue
             if archived == "exclude" and s.status == "archived":
@@ -206,7 +230,7 @@ class SessionStore:
         raw.update(fields)
         self._data[session_id] = raw
         self._save(self._data)
-        return PersistedSession(**raw)
+        return PersistedSession.from_dict(raw)
 
     def archive(self, session_id: str) -> bool:
         """Mark a session as archived."""
@@ -265,7 +289,7 @@ class SessionStore:
         for raw in self._data.values():
             msg_ids = raw.get("_email_msg_ids") or []
             if target in msg_ids:
-                return PersistedSession(**raw)
+                return PersistedSession.from_dict(raw)
         return None
 
     # -- Conversion -------------------------------------------------------------
@@ -304,7 +328,7 @@ class SessionStore:
         q = query.lower()
         results: list[dict[str, Any]] = []
         for raw in self._data.values():
-            s = PersistedSession(**raw)
+            s = PersistedSession.from_dict(raw)
             if s.status == "deleted":
                 continue
             title = (s.title or "").lower()
