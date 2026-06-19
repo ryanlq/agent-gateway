@@ -42,6 +42,7 @@ def register_builtin_adapters() -> None:
         ("telegram", "agent_gateway.adapters.telegram"),
         ("discord", "agent_gateway.adapters.discord"),
         ("slack", "agent_gateway.adapters.slack"),
+        ("feishu", "agent_gateway.adapters.feishu"),
         ("webhook", "agent_gateway.adapters.webhook"),
     ]:
         try:
@@ -79,7 +80,7 @@ def make_agent_callback(*, agent_timeout: float = 1800.0) -> Any:
     ) -> str:
         from agent_gateway.server.agent_factory import create_bridge
 
-        agent_type = _store.get_config("default_agent", "claude-code")
+        agent_type = _store.get_config("default_agent", "claude-code-sdk")
         bridge = create_bridge(agent_type, timeout=agent_timeout)
         try:
             chunks: list[str] = []

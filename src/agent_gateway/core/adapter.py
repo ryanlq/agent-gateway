@@ -109,6 +109,10 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_retryable: bool = True
 
+        # Backlog recovery state
+        self._backlog_recovered: bool = False
+        self._last_disconnect_time: Optional[float] = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -167,6 +171,17 @@ class BasePlatformAdapter(ABC):
     @abstractmethod
     async def disconnect(self) -> None:
         """Disconnect from the platform and clean up resources."""
+
+    async def recover_backlog(self) -> int:
+        """Recover messages missed during the offline period.
+
+        Called by the runner once after ``connect()`` succeeds.
+        Subclasses override this to fetch and replay missed messages
+        through ``handle_message()``.
+
+        Returns the number of recovered messages (0 = no-op).
+        """
+        return 0
 
     @abstractmethod
     async def send(
@@ -590,6 +605,8 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message = None
 
     def _mark_disconnected(self) -> None:
+        import time as _time
+        self._last_disconnect_time = _time.time()
         self._running = False
 
     def _set_fatal_error(self, code: str, message: str, *, retryable: bool = True) -> None:

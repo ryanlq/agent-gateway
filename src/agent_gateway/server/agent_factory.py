@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Lazy imports to avoid hard dependency on all bridges
 _AGENT_REGISTRY: dict[str, str] = {
     "claude-code": "agent_gateway.agents.claude_code:ClaudeCodeBridge",
+    "claude-code-sdk": "agent_gateway.agents.claude_code_sdk:ClaudeCodeSdkBridge",
     "pi": "agent_gateway.agents.pi_agent:PiAgentBridge",
 }
 

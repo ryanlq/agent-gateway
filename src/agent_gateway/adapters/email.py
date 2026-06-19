@@ -326,6 +326,7 @@ class EmailAdapter(BasePlatformAdapter):
         # Track message IDs we've already processed to avoid duplicates
         self._seen_uids: set[bytes] = set()
         self._seen_uids_max: int = 2000
+        self._pending_on_connect: int = 0
         self._poll_task: Optional[asyncio.Task] = None
 
         # Map (chat_id, normalized_subject) -> last subject + message-id for threading
@@ -351,6 +352,43 @@ class EmailAdapter(BasePlatformAdapter):
         except (ValueError, TypeError):
             self._seen_uids = set(list(self._seen_uids)[-self._seen_uids_max // 2:])
 
+    # -- Seen-UID persistence ----------------------------------------------
+
+    def _seen_uids_state_key(self) -> str:
+        """Per-address key for the persistent state file."""
+        safe = self._address.replace("@", "_at_").replace(".", "_")
+        return f"email_seen_uids_{safe}"
+
+    def _load_seen_uids(self) -> None:
+        """Restore ``_seen_uids`` from disk so restarts don't reprocess."""
+        try:
+            from agent_gateway.utils.state import load_state
+            data = load_state(self._seen_uids_state_key())
+            raw = data.get("uids", [])
+            if isinstance(raw, list):
+                for entry in raw:
+                    if isinstance(entry, str) and entry:
+                        self._seen_uids.add(entry.encode())
+            if self._seen_uids:
+                logger.info(
+                    "[Email] Loaded %d persisted seen UID(s)", len(self._seen_uids)
+                )
+        except Exception as exc:
+            logger.debug("[Email] Could not load persisted seen UIDs: %s", exc)
+
+    def _save_seen_uids(self) -> None:
+        """Persist ``_seen_uids`` to disk."""
+        if not self._seen_uids:
+            return
+        try:
+            from agent_gateway.utils.state import save_state
+            save_state(
+                self._seen_uids_state_key(),
+                {"uids": [u.decode(errors="replace") for u in self._seen_uids]},
+            )
+        except Exception as exc:
+            logger.debug("[Email] Could not persist seen UIDs: %s", exc)
+
     def _lookup_thread_context(
         self, to_addr: str, thread_id: str | None = None
     ) -> dict[str, str]:
@@ -373,34 +411,82 @@ class EmailAdapter(BasePlatformAdapter):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
-        """Connect to the IMAP server and start polling for new messages."""
-        try:
-            imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
-            imap.login(self._address, self._password)
-            _send_imap_id(imap)
-            imap.select("INBOX")
+    def _connect_imap_sync(self, baseline_uids: set[bytes] | None = None) -> dict:
+        """Blocking IMAP connection test — runs in executor thread.
+
+        If *baseline_uids* is provided (and empty), fills it with all current
+        inbox UIDs so that pre-existing messages are skipped on first run.
+        Returns ``{"pending": int, "baseline_seeded": bool}``.
+        """
+        imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
+        imap.login(self._address, self._password)
+        _send_imap_id(imap)
+        imap.select("INBOX")
+
+        result = {"pending": 0, "baseline_seeded": False}
+
+        if baseline_uids is not None and len(baseline_uids) == 0:
+            # First run with no persisted state — seed _seen_uids with every
+            # existing inbox UID so old mail is never processed.  This preserves
+            # the pre-refactor behaviour where users never saw surprise backlog.
             status, data = imap.uid("search", None, "ALL")
             if status == "OK" and data and data[0]:
                 for uid in data[0].split():
-                    self._seen_uids.add(uid)
-            self._trim_seen_uids()
-            imap.logout()
-            logger.info(
-                "[Email] IMAP connection test passed. %d existing messages skipped.",
-                len(self._seen_uids),
+                    baseline_uids.add(uid)
+                result["baseline_seeded"] = True
+                logger.info(
+                    "[Email] First run: seeded %d existing message(s) as seen "
+                    "(will not be processed).",
+                    len(baseline_uids),
+                )
+        else:
+            # We have persisted state — count UNSEEN for backlog reporting.
+            status, data = imap.uid("search", None, "UNSEEN")
+            if status == "OK" and data and data[0]:
+                # Only count messages we haven't seen before
+                unseen_uids = set(data[0].split())
+                if baseline_uids is not None:
+                    unseen_uids -= baseline_uids
+                result["pending"] = len(unseen_uids)
+
+        imap.logout()
+        logger.info(
+            "[Email] IMAP connection test passed. %d pending message(s).",
+            result["pending"],
+        )
+        return result
+
+    def _connect_smtp_sync(self) -> bool:
+        """Blocking SMTP connection — runs in executor thread."""
+        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        smtp.starttls(context=ssl.create_default_context())
+        smtp.login(self._address, self._password)
+        smtp.quit()
+        logger.info("[Email] SMTP connection test passed.")
+        return True
+
+    async def connect(self) -> bool:
+        """Connect to the IMAP server and start polling for new messages."""
+        loop = asyncio.get_running_loop()
+
+        # Restore persisted seen UIDs so restarts don't reprocess already-handled mail.
+        self._load_seen_uids()
+
+        try:
+            result = await loop.run_in_executor(
+                None, self._connect_imap_sync, self._seen_uids
             )
+            self._pending_on_connect = result.get("pending", 0)
+            if result.get("baseline_seeded"):
+                # Persist the seeded UIDs so subsequent restarts don't re-seed.
+                self._save_seen_uids()
         except Exception as e:
             logger.error("[Email] IMAP connection failed: %s", e)
             self._set_fatal_error("imap_failed", str(e))
             return False
 
         try:
-            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
-            smtp.quit()
-            logger.info("[Email] SMTP connection test passed.")
+            await loop.run_in_executor(None, self._connect_smtp_sync)
         except Exception as e:
             logger.error("[Email] SMTP connection failed: %s", e)
             self._set_fatal_error("smtp_failed", str(e))
@@ -421,6 +507,7 @@ class EmailAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+        self._save_seen_uids()
         self._mark_disconnected()
         logger.info("[Email] Disconnected.")
 
@@ -443,8 +530,24 @@ class EmailAdapter(BasePlatformAdapter):
         """Check INBOX for unseen messages and dispatch them."""
         loop = asyncio.get_running_loop()
         messages = await loop.run_in_executor(None, self._fetch_new_messages)
+
+        # Notify if backlog detected on first poll after connect
+        if self._pending_on_connect > 0 and messages:
+            backlog_count = len(messages)
+            if backlog_count > 1:
+                logger.info(
+                    "[Email] 📬 Recovering %d message(s) that arrived during offline period",
+                    backlog_count,
+                )
+            self._pending_on_connect = 0
+
         for msg_data in messages:
             await self._dispatch_message(msg_data)
+
+        # Persist seen UIDs after each batch so a crash/restart won't reprocess
+        # messages we already handled.
+        if messages:
+            self._save_seen_uids()
 
     def _fetch_new_messages(self) -> list[dict[str, Any]]:
         """Fetch new (unseen) messages from IMAP. Runs in executor thread."""
@@ -466,6 +569,12 @@ class EmailAdapter(BasePlatformAdapter):
                     self._seen_uids.add(uid)
                     if len(self._seen_uids) > self._seen_uids_max:
                         self._trim_seen_uids()
+
+                    # Mark as \Seen on IMAP server so restarts don't reprocess
+                    try:
+                        imap.uid("store", uid, "+FLAGS", "(\\Seen)")
+                    except Exception:
+                        pass
 
                     status, msg_data = imap.uid("fetch", uid, "(RFC822)")
                     if status != "OK":

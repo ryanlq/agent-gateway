@@ -277,7 +277,7 @@ async def _execute_agent(store: Any, job: dict, prompt: str) -> str:
     """
     from agent_gateway.server.agent_factory import create_bridge
 
-    agent_type = store.get_config("default_agent", "claude-code")
+    agent_type = store.get_config("default_agent", "claude-code-sdk")
     all_params: dict = store.get_config("agent_params") or {}
     agent_params = all_params.get(agent_type, {}) if isinstance(all_params, dict) else {}
 

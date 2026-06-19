@@ -108,23 +108,32 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
 
     _migrate_yaml_to_platform_env()
 
+    _runner_task: asyncio.Task | None = None
+
+    async def _start_runner_background() -> None:
+        """Start platform adapters in background without blocking HTTP server."""
+        try:
+            await runner.start()
+            adapter_names = list(runner.adapters.keys())
+            if adapter_names:
+                logger.info("Platform adapters started: %s", ", ".join(adapter_names))
+                print(f"[agent-gateway] Platform adapters: {', '.join(adapter_names)}", file=__import__('sys').stderr)
+        except Exception as exc:
+            logger.error("Failed to start platform adapters: %s", exc)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Graceful startup/shutdown: manage sessions and platform adapters."""
         logger.info("Agent Gateway starting up")
 
-        # Start platform adapters if runner is provided
+        # Start platform adapters in background — IMAP/SMTP connections use
+        # blocking I/O that would stall the event loop and prevent the HTTP
+        # server from accepting requests during startup.
+        nonlocal _runner_task
         if runner:
-            try:
-                await runner.start()
-                adapter_names = list(runner.adapters.keys())
-                if adapter_names:
-                    logger.info("Platform adapters started: %s", ", ".join(adapter_names))
-                    print(f"[agent-gateway] Platform adapters: {', '.join(adapter_names)}", file=__import__('sys').stderr)
-            except Exception as exc:
-                logger.error("Failed to start platform adapters: %s", exc)
+            _runner_task = asyncio.create_task(_start_runner_background())
 
-        # Start cron scheduler
+        # Start cron scheduler (non-blocking — just creates a background task)
         try:
             await cron_manager.start()
         except Exception as exc:
@@ -138,7 +147,12 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         except Exception as exc:
             logger.error("Error stopping cron scheduler: %s", exc)
 
-        # Stop platform adapters
+        # Wait for runner background task, then stop adapters
+        if _runner_task:
+            try:
+                await asyncio.wait_for(_runner_task, timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
+                _runner_task.cancel()
         if runner:
             try:
                 await runner.shutdown()

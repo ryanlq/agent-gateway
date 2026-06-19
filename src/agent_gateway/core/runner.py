@@ -47,6 +47,7 @@ from agent_gateway.core.registry import registry
 from agent_gateway.core.session import Session, SessionStore, build_session_context_prompt
 from agent_gateway.server.session_store import PersistedSession as DesktopSession
 from agent_gateway.core.stream import StreamConsumer, StreamConsumerConfig
+from agent_gateway.agents.events import AgentEvent
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,14 @@ class GatewayRunner:
                 if connected:
                     self.adapters[name] = adapter
                     logger.info("✅ %s connected", adapter.name)
+                    if not adapter._backlog_recovered:
+                        try:
+                            recovered = await adapter.recover_backlog()
+                            if recovered:
+                                logger.info("📬 %s recovered %d missed message(s)", adapter.name, recovered)
+                            adapter._backlog_recovered = True
+                        except Exception as exc:
+                            logger.warning("⚠️ %s backlog recovery failed: %s", adapter.name, exc)
                 else:
                     logger.error("❌ %s failed to connect", adapter.name)
             except Exception as exc:
@@ -197,6 +206,14 @@ class GatewayRunner:
                     filter_silence=self.config.filter_silence_narration,
                 )
                 logger.info("✅ %s started", adapter.name)
+                if not adapter._backlog_recovered:
+                    try:
+                        recovered = await adapter.recover_backlog()
+                        if recovered:
+                            logger.info("📬 %s recovered %d missed message(s)", adapter.name, recovered)
+                        adapter._backlog_recovered = True
+                    except Exception as exc:
+                        logger.warning("⚠️ %s backlog recovery failed: %s", adapter.name, exc)
                 return True
             else:
                 logger.error("❌ %s failed to connect", adapter.name)
@@ -466,14 +483,76 @@ class GatewayRunner:
                     session.key, user_input, session.history, context_extra,
                 )
 
+            _chunk_count = 0
             async for chunk in chunk_iter:
-                if isinstance(chunk, str):
+                _chunk_count += 1
+                if _chunk_count == 1:
+                    logger.info(
+                        "[runner] First chunk received: type=%s kind=%s",
+                        type(chunk).__name__,
+                        getattr(chunk, "kind", "-"),
+                    )
+                if isinstance(chunk, AgentEvent):
+                    # Structured event protocol (new bridges, e.g. claude-code-sdk)
+                    if chunk.kind == "text_delta":
+                        if chunk.text:
+                            full_text += chunk.text
+                            consumer.on_delta(chunk.text)
+                            if desktop_sid and self.desktop_emit:
+                                await self.desktop_emit(
+                                    "message.delta", {"text": chunk.text}, desktop_sid
+                                )
+                    elif chunk.kind == "reasoning_delta":
+                        if chunk.text and desktop_sid and self.desktop_emit:
+                            # Reasoning flows ONLY to the desktop reasoning panel.
+                            # Platforms (chat apps) don't get this — it would
+                            # spam the thread with the model's inner monologue.
+                            await self.desktop_emit(
+                                "reasoning.delta", {"text": chunk.text}, desktop_sid
+                            )
+                    elif chunk.kind == "tool_start":
+                        # Desktop: structured tool card (start)
+                        if desktop_sid and self.desktop_emit:
+                            await self.desktop_emit(
+                                "tool.start",
+                                {
+                                    "name": chunk.tool_name,
+                                    "tool_id": chunk.tool_id,
+                                    "input": chunk.tool_input,
+                                },
+                                desktop_sid,
+                            )
+                        # Platform: terse progress hint (optional, debounced)
+                        # Avoids flooding chat with every tool call; only the
+                        # StreamConsumer's own tool-progress logic emits these
+                        # at its configured rate.
+                        await consumer.on_tool_call(
+                            chunk.tool_name,
+                            preview="",
+                            args=chunk.tool_input,
+                        )
+                    elif chunk.kind == "tool_complete":
+                        if desktop_sid and self.desktop_emit:
+                            payload = {
+                                "name": chunk.tool_name,
+                                "tool_id": chunk.tool_id,
+                                "result": chunk.tool_result,
+                            }
+                            if chunk.is_error:
+                                payload["error"] = chunk.error_message or "tool failed"
+                            await self.desktop_emit(
+                                "tool.complete", payload, desktop_sid
+                            )
+
+                elif isinstance(chunk, str):
+                    # Legacy bridge: raw string chunk → text_delta
                     full_text += chunk
                     consumer.on_delta(chunk)
-                    # Push delta to desktop
                     if desktop_sid and self.desktop_emit:
                         await self.desktop_emit("message.delta", {"text": chunk}, desktop_sid)
+
                 elif hasattr(chunk, "tool_name"):
+                    # Legacy duck-typed tool call (e.g. ToolCallChunk)
                     await consumer.on_tool_call(
                         chunk.tool_name,
                         getattr(chunk, "preview", ""),
@@ -555,7 +634,7 @@ class GatewayRunner:
         from agent_gateway.server.agent_factory import create_bridge
 
         if self._desktop_store:
-            agent_type = self._desktop_store.get_config("default_agent", "claude-code")
+            agent_type = self._desktop_store.get_config("default_agent", "claude-code-sdk")
             # Per-agent params: { "claude-code": {...}, "pi": {...} }
             all_params: dict = self._desktop_store.get_config("agent_params") or {}
             agent_params = all_params.get(agent_type, {}) if isinstance(all_params, dict) else {}
@@ -974,7 +1053,7 @@ class GatewayRunner:
             )
             # Use the actual agent type, not "email" — the desktop client
             # needs a valid agent_type to create a bridge when resuming.
-            agent_type = store.get_config("default_agent", "claude-code")
+            agent_type = store.get_config("default_agent", "claude-code-sdk")
             store.create(
                 session_id=desktop_sid,
                 agent_type=agent_type,

@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 from agent_gateway.agents.base import CLIAgentError
+from agent_gateway.agents.events import AgentEvent
 from agent_gateway.server.agent_status import detect_agents
 from agent_gateway.server.session_manager import SessionManager
 
@@ -161,6 +162,14 @@ async def handle_session_interrupt(
     task = _running_prompts.get(session_id)
     if task is not None and not task.done():
         task.cancel()
+        # Give the event loop one tick so the CancelledError propagates
+        # before we return to the caller.
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
         logger.info("Interrupted session %s", session_id)
         return {"status": "interrupted", "session_id": session_id}
     return {"status": "idle", "session_id": session_id}
@@ -301,7 +310,10 @@ async def _run_prompt(
     # Push message.start
     await emit("message.start", {}, session_id)
 
-    full_text: list[str] = []
+    text_parts: list[str] = []
+    saw_text_delta = False
+    reasoning_fallback: list[str] = []
+    completion_sent = False
     try:
         async for chunk in session.bridge.stream(
             session_key=session_id,
@@ -310,18 +322,75 @@ async def _run_prompt(
             system_extra=system_extra,
             session_ref=session_ref_value,
         ):
-            full_text.append(chunk)
-            await emit("message.delta", {"text": chunk}, session_id)
+            if isinstance(chunk, AgentEvent):
+                if chunk.kind == "text_delta":
+                    if chunk.text:
+                        saw_text_delta = True
+                        text_parts.append(chunk.text)
+                        await emit(
+                            "message.delta", {"text": chunk.text}, session_id
+                        )
+                elif chunk.kind == "reasoning_delta":
+                    if chunk.text:
+                        reasoning_fallback.append(chunk.text)
+                        await emit(
+                            "reasoning.delta", {"text": chunk.text}, session_id
+                        )
+                elif chunk.kind == "tool_start":
+                    await emit(
+                        "tool.start",
+                        {
+                            "name": chunk.tool_name,
+                            "tool_id": chunk.tool_id,
+                            "input": chunk.tool_input,
+                        },
+                        session_id,
+                    )
+                elif chunk.kind == "tool_complete":
+                    payload: dict = {
+                        "name": chunk.tool_name,
+                        "tool_id": chunk.tool_id,
+                        "result": chunk.tool_result,
+                    }
+                    if chunk.is_error:
+                        payload["error"] = chunk.error_message or "tool failed"
+                    await emit("tool.complete", payload, session_id)
+            elif isinstance(chunk, str):
+                # Legacy bridge — raw string chunk
+                saw_text_delta = True
+                text_parts.append(chunk)
+                await emit("message.delta", {"text": chunk}, session_id)
+            elif hasattr(chunk, "tool_name"):
+                # Legacy duck-typed tool call
+                await emit(
+                    "tool.start",
+                    {
+                        "name": chunk.tool_name,
+                        "tool_id": getattr(chunk, "id", "") or "",
+                        "input": getattr(chunk, "args", None) or {},
+                    },
+                    session_id,
+                )
+
+        # Safety net: if the model produced ONLY reasoning with no text,
+        # promote the reasoning to a text_delta so the chat isn't empty.
+        if not saw_text_delta and reasoning_fallback:
+            fallback_text = (
+                "\n\n💭 *model reasoning (no final text):*\n\n"
+                + "".join(reasoning_fallback)
+            )
+            text_parts.append(fallback_text)
+            await emit("message.delta", {"text": fallback_text}, session_id)
 
     except CLIAgentError as exc:
         logger.error("Agent error: %s", exc)
-        error_msg = str(exc)
-        full_text.append(f"\n\n⚠️ Agent error: {error_msg}")
+        error_msg = f"\n\n⚠️ Agent error: {exc}"
+        text_parts.append(error_msg)
         await emit("message.delta", {"text": error_msg}, session_id)
 
     except asyncio.CancelledError:
         logger.info("Prompt task cancelled for session %s", session_id)
-        response_text = "".join(full_text)
+        response_text = "".join(text_parts)
         if response_text:
             session.history.append({"role": "user", "content": text})
             session.history.append({"role": "assistant", "content": response_text})
@@ -332,15 +401,17 @@ async def _run_prompt(
                 session.cli_session_id = None
             sessions.persist_session(session_id)
         await emit("message.complete", {"text": response_text}, session_id)
+        completion_sent = True
         raise
 
     except Exception as exc:
         logger.exception("Unexpected error in prompt.submit")
-        error_msg = f"Unexpected error: {exc}"
-        full_text.append(error_msg)
-        await emit("error", {"message": error_msg}, session_id)
+        error_msg = f"\n\n⚠️ Unexpected error: {exc}"
+        text_parts.append(error_msg)
+        await emit("message.delta", {"text": error_msg}, session_id)
+        await emit("error", {"message": str(exc)}, session_id)
 
-    response_text = "".join(full_text)
+    response_text = "".join(text_parts)
 
     # Latch the native session id captured during the stream. If we attempted a
     # resume but got nothing back, the CLI session is gone (e.g. user deleted
@@ -386,8 +457,11 @@ async def _run_prompt(
     if cron_confirm_text:
         await emit("message.delta", {"text": cron_confirm_text}, session_id)
 
-    # Push message.complete
-    await emit("message.complete", {"text": response_text}, session_id)
+    # Push message.complete (belt-and-suspenders: may already have been sent
+    # by the CancelledError handler above).
+    if not completion_sent:
+        await emit("message.complete", {"text": response_text}, session_id)
+        completion_sent = True
 
 
 def _make_lightweight_session(desktop_session: Any):

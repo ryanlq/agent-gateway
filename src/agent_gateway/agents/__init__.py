@@ -16,6 +16,7 @@ Usage::
     # or: runner = GatewayRunner(config, agent_callback=bridge.as_callback())
 """
 
+from agent_gateway.agents.events import AgentEvent
 from agent_gateway.agents.base import (
     CLIAgentBridge,
     CLIAgentError,
@@ -29,12 +30,14 @@ from agent_gateway.agents.base import (
     SubprocessPool,
 )
 from agent_gateway.agents.claude_code import ClaudeCodeBridge
+from agent_gateway.agents.claude_code_sdk import ClaudeCodeSdkBridge
 from agent_gateway.agents.pi_agent import PiAgentBridge
 
 __all__ = [
     # Bridges
     "CLIAgentBridge",
     "ClaudeCodeBridge",
+    "ClaudeCodeSdkBridge",
     "PiAgentBridge",
     # Infrastructure
     "SubprocessConfig",
@@ -47,4 +50,6 @@ __all__ = [
     "CLIOutputTooLargeError",
     "CLIParseError",
     "CLITimeoutError",
+    # Structured event protocol
+    "AgentEvent",
 ]
