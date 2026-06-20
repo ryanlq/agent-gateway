@@ -222,8 +222,12 @@ class StreamConsumer:
                 )
                 if result.success:
                     return result
+                logger.warning(
+                    "Final edit failed (msg_id=%s): %s",
+                    self._message_id, result.error,
+                )
             except Exception as exc:
-                logger.debug("Final edit failed, falling back to send: %s", exc)
+                logger.warning("Final edit raised: %s", exc)
 
         # Otherwise send the final content as a fresh message
         try:

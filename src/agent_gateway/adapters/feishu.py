@@ -348,6 +348,26 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.exception("[Feishu] edit_message() failed")
             return SendResult(success=False, error=str(exc))
 
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        if not self._client:
+            return False
+        try:
+            from lark_oapi.api.im.v1 import DeleteMessageRequest
+
+            req = (
+                DeleteMessageRequest.builder()
+                .message_id(message_id)
+                .build()
+            )
+            resp = await asyncio.to_thread(self._client.im.v1.message.delete, req)
+            if not resp.success():
+                logger.debug("[Feishu] delete_message failed: [%s] %s", resp.code, resp.msg)
+                return False
+            return True
+        except Exception as exc:
+            logger.debug("[Feishu] delete_message() error: %s", exc)
+            return False
+
     def supports_edit(self) -> bool:
         return True
 
