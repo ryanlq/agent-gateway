@@ -38,6 +38,7 @@ from agent_gateway.core.adapter import BasePlatformAdapter
 from agent_gateway.core.config import GatewayConfig
 from agent_gateway.core.delivery import DeliveryRouter, DeliveryTarget
 from agent_gateway.core.message import (
+    ChatType,
     EphemeralReply,
     MessageEvent,
     MessageSource,
@@ -427,40 +428,56 @@ class GatewayRunner:
             metadata=consumer_metadata,
         )
 
+        # Opt-in tool-call card (e.g. Feishu): when the adapter supports it,
+        # a single streaming summary card replaces the per-tool progress
+        # messages that StreamConsumer.on_tool_call would otherwise send.
+        tool_handle: Any = None
+        if adapter.supports_tool_card():
+            tool_handle = await adapter.begin_tool_round(
+                source.chat_id,
+                reply_to=event.reply_to_message_id,
+                metadata=consumer_metadata,
+            )
+
         # Determine the session ID for desktop events (if applicable)
         desktop_sid: str | None = None
         if self._desktop_store:
-            raw = event.raw_message or {}
-            in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
-            references_raw = raw.get("references", "")
-            sender = source.user_id.replace("@", "-").replace(".", "-")
-            # Prefer adapter-resolved thread_id (already walked In-Reply-To)
-            # over re-normalizing the raw subject which may have localized
-            # prefixes like "回复:", "Aw:", "Réf :" etc.
-            subject = source.thread_id or _normalize_subject(str(raw.get("subject", "")).strip())
-            # Try to find existing session via In-Reply-To
-            if in_reply_to:
-                parent = self._desktop_store.find_by_email_message_id(in_reply_to)
-                if parent:
-                    desktop_sid = parent.session_id
-            # Walk References header chain as fallback
-            if not desktop_sid and references_raw:
-                for ref_id in references_raw.split():
-                    ref_id = ref_id.strip("<> \t\n")
-                    if ref_id:
-                        parent = self._desktop_store.find_by_email_message_id(ref_id)
-                        if parent:
-                            desktop_sid = parent.session_id
-                            break
-            if not desktop_sid:
-                if subject:
-                    subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
-                    desktop_sid = f"email-{sender}-{subject_hash}"
-                else:
-                    desktop_sid = f"email-{sender}"
-                existing = self._desktop_store.get(desktop_sid)
-                if not existing:
-                    desktop_sid = None  # Will be created in _sync_to_desktop later
+            # IM platforms (feishu, telegram, ...): one deterministic session id
+            # per chat (+ topic). Email keeps its In-Reply-To / subject threading.
+            if source.platform != "email":
+                desktop_sid = self._chat_desktop_session_id(source)
+            else:
+                raw = event.raw_message or {}
+                in_reply_to = raw.get("in_reply_to") or event.reply_to_message_id
+                references_raw = raw.get("references", "")
+                sender = source.user_id.replace("@", "-").replace(".", "-")
+                # Prefer adapter-resolved thread_id (already walked In-Reply-To)
+                # over re-normalizing the raw subject which may have localized
+                # prefixes like "回复:", "Aw:", "Réf :" etc.
+                subject = source.thread_id or _normalize_subject(str(raw.get("subject", "")).strip())
+                # Try to find existing session via In-Reply-To
+                if in_reply_to:
+                    parent = self._desktop_store.find_by_email_message_id(in_reply_to)
+                    if parent:
+                        desktop_sid = parent.session_id
+                # Walk References header chain as fallback
+                if not desktop_sid and references_raw:
+                    for ref_id in references_raw.split():
+                        ref_id = ref_id.strip("<> \t\n")
+                        if ref_id:
+                            parent = self._desktop_store.find_by_email_message_id(ref_id)
+                            if parent:
+                                desktop_sid = parent.session_id
+                                break
+                if not desktop_sid:
+                    if subject:
+                        subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
+                        desktop_sid = f"email-{sender}-{subject_hash}"
+                    else:
+                        desktop_sid = f"email-{sender}"
+                    existing = self._desktop_store.get(desktop_sid)
+                    if not existing:
+                        desktop_sid = None  # Will be created in _sync_to_desktop later
 
         # Notify desktop: stream starting
         if desktop_sid and self.desktop_emit:
@@ -522,15 +539,22 @@ class GatewayRunner:
                                 },
                                 desktop_sid,
                             )
-                        # Platform: terse progress hint (optional, debounced)
-                        # Avoids flooding chat with every tool call; only the
-                        # StreamConsumer's own tool-progress logic emits these
-                        # at its configured rate.
-                        await consumer.on_tool_call(
-                            chunk.tool_name,
-                            preview="",
-                            args=chunk.tool_input,
-                        )
+                        # Platform: either the streaming tool card (opt-in) or
+                        # the legacy terse progress hint. When a tool card is
+                        # active we skip on_tool_call — it would send a separate
+                        # message per tool, which the card replaces.
+                        if tool_handle is not None:
+                            await adapter.tool_round_start(tool_handle, {
+                                "name": chunk.tool_name,
+                                "tool_id": chunk.tool_id,
+                                "input": chunk.tool_input,
+                            })
+                        else:
+                            await consumer.on_tool_call(
+                                chunk.tool_name,
+                                preview="",
+                                args=chunk.tool_input,
+                            )
                     elif chunk.kind == "tool_complete":
                         if desktop_sid and self.desktop_emit:
                             payload = {
@@ -543,6 +567,14 @@ class GatewayRunner:
                             await self.desktop_emit(
                                 "tool.complete", payload, desktop_sid
                             )
+                        if tool_handle is not None:
+                            await adapter.tool_round_complete(tool_handle, {
+                                "name": chunk.tool_name,
+                                "tool_id": chunk.tool_id,
+                                "result": chunk.tool_result,
+                                "is_error": chunk.is_error,
+                                "error_message": chunk.error_message,
+                            })
 
                 elif isinstance(chunk, str):
                     # Legacy bridge: raw string chunk → text_delta
@@ -560,6 +592,9 @@ class GatewayRunner:
                     )
 
             result = await consumer.finish(full_text)
+
+            if tool_handle is not None:
+                await adapter.end_tool_round(tool_handle, success=True)
 
             # Post-process cron operations in streaming response
             # Note: the raw block may have been streamed to the platform already,
@@ -612,6 +647,8 @@ class GatewayRunner:
             error_text = f"\n\n⚠️ Stream error: {exc}"
             full_text += error_text
             await consumer.finish(full_text)
+            if tool_handle is not None:
+                await adapter.end_tool_round(tool_handle, success=False)
             if desktop_sid and self.desktop_emit:
                 await self.desktop_emit("message.delta", {"text": error_text}, desktop_sid)
                 await self.desktop_emit("message.complete", {"text": full_text}, desktop_sid)
@@ -979,6 +1016,93 @@ class GatewayRunner:
     # Desktop session sync
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # IM platform desktop sync (feishu, telegram, discord, ...)
+    # ------------------------------------------------------------------
+
+    _PLATFORM_LABELS: dict[str, str] = {
+        "feishu": "飞书",
+        "lark": "飞书",
+        "telegram": "Telegram",
+        "discord": "Discord",
+        "slack": "Slack",
+        "matrix": "Matrix",
+        "whatsapp": "WhatsApp",
+        "signal": "Signal",
+        "qqbot": "QQ",
+        "weixin": "微信",
+        "wecom": "企业微信",
+        "dingtalk": "钉钉",
+    }
+
+    @staticmethod
+    def _chat_desktop_session_id(source: MessageSource) -> str:
+        """Deterministic desktop session id for IM platforms.
+
+        ``{platform}-{chat_id}[-{thread_id}]``. A topic/thread reply gets its
+        own session; plain group or DM messages share one session per chat.
+        """
+        parts = [source.platform, source.chat_id]
+        if source.thread_id:
+            parts.append(source.thread_id)
+        return "-".join(parts)
+
+    def _platform_display(self, source: MessageSource) -> str:
+        """Human-readable origin for the sidebar, e.g. "飞书·群聊"."""
+        label = self._PLATFORM_LABELS.get(source.platform, source.platform or "Chat")
+        is_group = getattr(source, "chat_type", None) == ChatType.GROUP
+        return f"{label}·{'群聊' if is_group else '私聊'}"
+
+    def _sync_chat_to_desktop(
+        self,
+        store: Any,
+        source: MessageSource,
+        user_input: str,
+        response: Optional[str],
+    ) -> None:
+        """Persist an IM conversation turn to the desktop store.
+
+        One desktop session per chat (+ topic), keyed by
+        ``{platform}-{chat_id}[-{thread_id}]`` so a Feishu topic, a plain group
+        chat, and a DM never collapse into the same sidebar entry.
+        """
+        desktop_sid = self._chat_desktop_session_id(source)
+        existing = store.get(desktop_sid)
+
+        if existing is None:
+            first_line = (user_input or "").strip().split("\n")[0][:60]
+            base = self._platform_display(source)
+            title = f"{base} · {first_line}" if first_line else base
+            agent_type = store.get_config("default_agent", "claude-code-sdk")
+            store.create(
+                session_id=desktop_sid,
+                agent_type=agent_type,
+                title=title,
+                platform=source.platform,
+                chat_id=source.chat_id,
+                thread_id=source.thread_id,
+                chat_type=(
+                    "group"
+                    if getattr(source, "chat_type", None) == ChatType.GROUP
+                    else "p2p"
+                ),
+                source=base,
+            )
+            history: list[dict[str, Any]] = []
+        else:
+            history = list(existing.history)
+
+        history.append({"role": "user", "content": user_input})
+        if response:
+            history.append({"role": "assistant", "content": str(response)})
+
+        store.update_history(desktop_sid, history)
+        store.update(desktop_sid, last_active=time.time())
+        logger.debug(
+            "Synced %d messages to desktop session %s (%s)",
+            len(history), desktop_sid, source.platform,
+        )
+
     def _sync_to_desktop(
         self,
         source: MessageSource,
@@ -994,6 +1118,12 @@ class GatewayRunner:
         """
         store = self._desktop_store
         if store is None:
+            return
+
+        # IM platforms use their own chat/topic-keyed sync; email keeps the
+        # In-Reply-To / subject threading below.
+        if source.platform != "email":
+            self._sync_chat_to_desktop(store, source, user_input, response)
             return
 
         # --- Session routing strategy ---

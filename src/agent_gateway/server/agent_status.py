@@ -91,9 +91,9 @@ _AGENT_META: dict[str, dict[str, Any]] = {
                 "key": "permission_mode",
                 "label": "Permission Mode",
                 "type": "select",
-                "options": ["default", "acceptEdits", "plan", "bypassPermissions"],
+                "options": ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"],
                 "default": "acceptEdits",
-                "description": "工具授权模式。acceptEdits=自动批准编辑，适合 coding 任务。",
+                "description": "工具授权模式。default=每次询问；acceptEdits=自动批准编辑+常用文件命令；plan=只读分析不改文件；auto=自动批准大部分操作（后台安全检查，需 CLI v2.1.83+）；dontAsk=仅放行白名单工具，其余拒绝（适合非交互/CI）；bypassPermissions=跳过所有检查（仅限沙箱）。",
             },
             {
                 "key": "allowed_tools",

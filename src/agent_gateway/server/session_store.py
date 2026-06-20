@@ -46,6 +46,14 @@ class PersistedSession:
     workspace_name: str | None = None
     model: str | None = None
     agent_type: str = "claude-code"
+    # Origin provenance for platform-delivered conversations (feishu, telegram,
+    # email, ...). Local desktop sessions leave these as None. Persisted since
+    # 2026-06-20; older records load as None via from_dict's field filtering.
+    platform: str | None = None
+    chat_id: str | None = None
+    thread_id: str | None = None
+    chat_type: str | None = None  # "p2p" | "group" (mirrors MessageSource.chat_type)
+    source: str | None = None      # Human-readable origin, e.g. "飞书·群聊"
     status: str = "active"  # "active" | "archived" | "deleted"
     message_count: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -163,6 +171,11 @@ class SessionStore:
         backend_session_ref: str | None = None,
         model: str | None = None,
         title: str | None = None,
+        platform: str | None = None,
+        chat_id: str | None = None,
+        thread_id: str | None = None,
+        chat_type: str | None = None,
+        source: str | None = None,
     ) -> PersistedSession:
         """Create a new persisted session and write to disk."""
         ref = backend_session_ref or str(uuid.uuid4())
@@ -175,6 +188,11 @@ class SessionStore:
             workspace_name=ws_name,
             model=model,
             title=title,
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            chat_type=chat_type,
+            source=source,
         )
         self._data[session_id] = asdict(session)
         self._save(self._data)
@@ -311,7 +329,11 @@ class SessionStore:
             "input_tokens": 0,
             "output_tokens": 0,
             "tool_call_count": 0,
-            "source": None,
+            "source": session.source,
+            "platform": session.platform,
+            "chat_id": session.chat_id,
+            "thread_id": session.thread_id,
+            "chat_type": session.chat_type,
             # A session is its own lineage root at creation. Branches created
             # via session.create start independent roots today (no parent param),
             # so the client's pin (sessionPinId, session.ts) resolves to the
@@ -342,7 +364,7 @@ class SessionStore:
                         "role": None,
                         "session_started": s.created_at,
                         "snippet": s.preview or s.title or "",
-                        "source": None,
+                        "source": s.source,
                     }
                 )
                 if len(results) >= limit:

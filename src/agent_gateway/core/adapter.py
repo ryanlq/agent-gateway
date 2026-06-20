@@ -261,6 +261,54 @@ class BasePlatformAdapter(ABC):
         """Send or update an animated streaming-draft preview."""
         return SendResult(success=False, error="Not supported")
 
+    # -- Tool-call card streaming (opt-in) -----------------------------------
+
+    def supports_tool_card(self) -> bool:
+        """Whether this adapter renders a round's tool calls as a streaming card.
+
+        When ``True``, the runner drives a per-round card via
+        :meth:`begin_tool_round` / :meth:`tool_round_start` /
+        :meth:`tool_round_complete` / :meth:`end_tool_round` instead of
+        sending a separate progress message per tool. Default: off.
+        """
+        return False
+
+    async def begin_tool_round(
+        self,
+        chat_id: str,
+        *,
+        reply_to: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        """Called at the start of an agent round (before any tool event).
+
+        Returns an opaque, adapter-owned round handle passed back to the
+        other ``tool_round_*`` hooks, or ``None`` if the adapter declines.
+        Default: no-op (returns ``None``).
+        """
+        return None
+
+    async def tool_round_start(self, handle: Any, tool: dict[str, Any]) -> None:
+        """A tool began executing.
+
+        ``tool`` keys: ``name``, ``tool_id``, ``input`` (dict).
+        """
+
+    async def tool_round_complete(self, handle: Any, tool: dict[str, Any]) -> None:
+        """A tool finished.
+
+        ``tool`` keys: ``name``, ``tool_id``, ``result``, ``is_error``,
+        ``error_message``.
+        """
+
+    async def end_tool_round(self, handle: Any, *, success: bool = True) -> None:
+        """The agent round ended. Finalise any streaming card.
+
+        ``success=False`` indicates the round was interrupted (agent error /
+        stream exception); adapters should still close the card, marking any
+        still-running tools as interrupted.
+        """
+
     # -- Media delivery -----------------------------------------------------
 
     async def send_image(
