@@ -1200,7 +1200,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         env_home = _os.environ.get("NEXUS_AGENT_HOME")
         log_dir = (
             _Path(env_home) / "logs" if env_home
-            else _Path.home() / ".hermes" / "logs"
+            else _Path.home() / ".nexus-agent" / "logs"
         )
 
         file_param = request.query_params.get("file", "agent")
@@ -1245,7 +1245,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         env_home = _os.environ.get("NEXUS_AGENT_HOME")
         log_dir = (
             _Path(env_home) / "logs" if env_home
-            else _Path.home() / ".hermes" / "logs"
+            else _Path.home() / ".nexus-agent" / "logs"
         )
 
         file_param = request.query_params.get("file", "agent")

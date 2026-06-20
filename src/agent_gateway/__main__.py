@@ -33,17 +33,18 @@ _NEXUS_AGENT_DIR = Path.home() / ".nexus-agent"
 # ---------------------------------------------------------------------------
 
 def _resolve_log_dir() -> Path:
-    """Resolve the log directory.
+    """Resolve the gateway's own log directory.
 
-    The desktop electron process sets ``NEXUS_AGENT_HOME`` when spawning the
-    gateway.  On Linux/macOS it defaults to ``~/.hermes``; on Windows to
-    ``%LOCALAPPDATA%\\hermes``.  Logs go under ``logs/`` inside that dir so
-    they sit alongside ``agent.log``, ``errors.log``, ``gui.log``.
+    ``NEXUS_AGENT_HOME`` (set by the desktop, tests, or the user) overrides the
+    default; otherwise logs go under ``~/.nexus-agent/logs`` — co-located with
+    the gateway's persisted sessions (``~/.nexus-agent/sessions.json``) so the
+    gateway's data is self-contained and no longer leaks into the legacy
+    ``~/.hermes`` tree left over from the upstream Hermes project.
     """
     env_home = os.environ.get("NEXUS_AGENT_HOME")
     if env_home:
         return Path(env_home) / "logs"
-    return Path.home() / ".hermes" / "logs"
+    return Path.home() / ".nexus-agent" / "logs"
 
 
 LOG_DIR = _resolve_log_dir()
