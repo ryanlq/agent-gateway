@@ -114,6 +114,26 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         """Start platform adapters in background without blocking HTTP server."""
         try:
             await runner.start()
+
+            # Honor the user's persisted enable intent (UI toggles) on boot so
+            # saved toggles actually start those adapters, even when they aren't
+            # (yet) listed in gateway.yaml. Also surface persisted creds into
+            # os.environ for adapters that read it (e.g. Feishu).
+            if runner:
+                import os
+                all_env = _get_platform_env()
+                for _name, env_vars in all_env.items():
+                    for _key, _val in env_vars.items():
+                        if _val:
+                            os.environ[_key] = _val
+                for name, is_on in _get_enabled_platforms().items():
+                    if not is_on or name in runner.adapters:
+                        continue
+                    try:
+                        await runner.start_adapter(name, dict(all_env.get(name, {})))
+                    except Exception as exc:
+                        logger.warning("Failed to start persisted-enabled adapter '%s': %s", name, exc)
+
             adapter_names = list(runner.adapters.keys())
             if adapter_names:
                 logger.info("Platform adapters started: %s", ", ".join(adapter_names))
@@ -772,6 +792,20 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         """Persist platform env vars to gateway-config.json."""
         store.set_config("platform_env", data)
 
+    def _get_enabled_platforms() -> dict[str, bool]:
+        """Read the user's persisted enable/disable intent (UI toggles).
+
+        Keys are platform ids; values are the intended on/off state. Absent
+        means "no explicit choice" (callers fall back to the running state).
+        """
+        return store.get_config("platform_enabled", {})
+
+    def _set_platform_enabled(platform_id: str, enabled: bool) -> None:
+        """Persist the user's enable/disable intent for one platform."""
+        current = _get_enabled_platforms()
+        current[platform_id] = bool(enabled)
+        store.set_config("platform_enabled", current)
+
     def _build_env_vars(
         entry: Any,
         persisted: dict[str, str],
@@ -808,6 +842,9 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
                 "url": defn.url or None,
                 "is_set": is_set,
                 "redacted_value": redacted,
+                # Non-secret values (e.g. FEISHU_DOMAIN) are returned in clear
+                # so the UI can drive derived controls from them.
+                "value": value if (is_set and not defn.sensitive) else None,
             })
         return result
 
@@ -821,6 +858,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         from agent_gateway.core.registry import registry as platform_registry
 
         all_env = _get_platform_env()
+        persisted_enabled = _get_enabled_platforms()
         platforms: list[dict[str, Any]] = []
 
         for entry in platform_registry.all_entries():
@@ -854,7 +892,9 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
                 "name": entry.label,
                 "description": entry.platform_hint[:120] if entry.platform_hint else entry.label,
                 "docs_url": "",
-                "enabled": entry.name in (runner.adapters if runner else {}),
+                "enabled": persisted_enabled.get(
+                    entry.name, entry.name in (runner.adapters if runner else {})
+                ),
                 "configured": required_set,
                 "gateway_running": runner is not None and runner._running,
                 "state": state,
@@ -905,8 +945,13 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         all_env[platform_id] = platform_env
         _set_platform_env(all_env)
 
-        # Handle enable/disable
+        # Handle enable/disable. Persist the user's intent so it survives a
+        # gateway restart ("restart to apply"); the hot-restart below is
+        # best-effort and must not un-set that intent.
         enabled = body.get("enabled")
+        if enabled is not None:
+            _set_platform_enabled(platform_id, bool(enabled))
+
         should_run = enabled if enabled is not None else (platform_id in (runner.adapters if runner else {}))
 
         if not runner:
@@ -915,6 +960,12 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         if should_run:
             # Build config dict from persisted env vars
             config_dict = dict(platform_env)
+            # Surface persisted creds into os.environ so adapters that read it
+            # (e.g. Feishu, which keys off FEISHU_APP_ID) can connect on a
+            # hot-restart even when no env var was updated in this same call.
+            for key, val in platform_env.items():
+                if val:
+                    os.environ[key] = val
             success = await runner.restart_adapter(platform_id, config_dict)
             if not success:
                 logger.warning("Failed to restart adapter '%s'", platform_id)
@@ -1113,11 +1164,16 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
                 for key, val in env_vars.items():
                     os.environ[key] = val
 
-            # Re-read platform configs from platform_env
+            # Re-read platform configs from platform_env. Respect the user's
+            # persisted enable/disable intent — skip platforms they turned off.
+            # Platforms with no recorded intent default to enabled (back-compat).
+            persisted_enabled = _get_enabled_platforms()
             for name, env_vars in all_env.items():
                 from agent_gateway.core.registry import registry as platform_registry
                 entry = platform_registry.get(name)
                 if not entry:
+                    continue
+                if persisted_enabled.get(name, True) is False:
                     continue
                 config_dict = dict(env_vars)
                 await runner.start_adapter(name, config_dict)
@@ -1138,7 +1194,78 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
 
     @app.get("/api/logs")
     async def rest_logs(request: Request) -> dict[str, Any]:
-        return {"logs": [], "lines": []}
+        from pathlib import Path as _Path
+        import os as _os
+
+        env_home = _os.environ.get("NEXUS_AGENT_HOME")
+        log_dir = (
+            _Path(env_home) / "logs" if env_home
+            else _Path.home() / ".hermes" / "logs"
+        )
+
+        file_param = request.query_params.get("file", "agent")
+        lines_param = int(request.query_params.get("lines", "200"))
+        level_param = request.query_params.get("level", "")
+
+        file_map = {
+            "agent": "gateway.log",
+            "gateway": "gateway.log",
+            "gui": "gui.log",
+            "errors": "errors.log",
+        }
+        log_name = file_map.get(file_param, "gateway.log")
+        log_path = log_dir / log_name
+
+        if not log_path.is_file():
+            return {"file": file_param, "lines": []}
+
+        try:
+            import collections
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                tail = collections.deque(fh, maxlen=max(1, lines_param))
+            result = [line.rstrip("\n") for line in tail]
+            if level_param and level_param != "ALL":
+                level_upper = level_param.upper()
+                filtered = []
+                for line in result:
+                    prefix = line.split("]", 1)[0] if "]" in line else line
+                    if level_upper in prefix:
+                        filtered.append(line)
+                result = filtered
+            return {"file": file_param, "lines": result}
+        except Exception as exc:
+            logger.warning("Failed to read log file %s: %s", log_path, exc)
+            return {"file": file_param, "lines": [f"Error reading log: {exc}"]}
+
+    @app.delete("/api/logs")
+    async def rest_logs_clear(request: Request) -> dict[str, Any]:
+        from pathlib import Path as _Path
+        import os as _os
+
+        env_home = _os.environ.get("NEXUS_AGENT_HOME")
+        log_dir = (
+            _Path(env_home) / "logs" if env_home
+            else _Path.home() / ".hermes" / "logs"
+        )
+
+        file_param = request.query_params.get("file", "agent")
+        file_map = {
+            "agent": "gateway.log",
+            "gateway": "gateway.log",
+            "gui": "gui.log",
+            "errors": "errors.log",
+        }
+        log_name = file_map.get(file_param, "gateway.log")
+        log_path = log_dir / log_name
+
+        if log_path.is_file():
+            try:
+                log_path.write_text("", encoding="utf-8")
+                logger.info("Cleared log file: %s", log_path)
+                return {"ok": True, "file": file_param}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+        return {"ok": True, "file": file_param}
 
     @app.get("/api/analytics/usage")
     async def rest_analytics_usage(request: Request) -> dict[str, Any]:

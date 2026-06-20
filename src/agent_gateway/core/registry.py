@@ -61,6 +61,11 @@ class EnvVarDef:
     url: str = ""
     """Link to documentation for obtaining this value."""
 
+    sensitive: bool = True
+    """If False, the value is non-secret (e.g. a public API URL) and may be
+    returned to the UI in clear text so it can drive derived controls
+    (such as a Feishu/Lark region selector backed by ``FEISHU_DOMAIN``)."""
+
 
 @dataclass
 class PlatformEntry:

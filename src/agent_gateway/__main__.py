@@ -29,6 +29,48 @@ _NEXUS_AGENT_DIR = Path.home() / ".nexus-agent"
 
 
 # ---------------------------------------------------------------------------
+# File logging
+# ---------------------------------------------------------------------------
+
+def _resolve_log_dir() -> Path:
+    """Resolve the log directory.
+
+    The desktop electron process sets ``NEXUS_AGENT_HOME`` when spawning the
+    gateway.  On Linux/macOS it defaults to ``~/.hermes``; on Windows to
+    ``%LOCALAPPDATA%\\hermes``.  Logs go under ``logs/`` inside that dir so
+    they sit alongside ``agent.log``, ``errors.log``, ``gui.log``.
+    """
+    env_home = os.environ.get("NEXUS_AGENT_HOME")
+    if env_home:
+        return Path(env_home) / "logs"
+    return Path.home() / ".hermes" / "logs"
+
+
+LOG_DIR = _resolve_log_dir()
+_GATEWAY_LOG_PATH = LOG_DIR / "gateway.log"
+
+
+def setup_file_logging() -> None:
+    """Direct Python logging output to ``gateway.log`` in the shared log dir.
+
+    The desktop's ``/api/logs`` endpoint reads this file to display gateway
+    logs in the command center UI.
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(_GATEWAY_LOG_PATH, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(handler)
+
+
+# ---------------------------------------------------------------------------
 # Built-in adapter registration
 # ---------------------------------------------------------------------------
 
@@ -153,6 +195,8 @@ def try_create_runner() -> Optional[Any]:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    setup_file_logging()
+
     parser = argparse.ArgumentParser(
         prog="agent_gateway",
         description="Agent Gateway server for nexus-agent integration",

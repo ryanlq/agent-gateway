@@ -81,6 +81,9 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws: Any = None  # lark_oapi.ws.Client
         self._ws_thread: Optional[threading.Thread] = None
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ws_connected: bool = False
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._ws_fatal_error: Optional[str] = None
 
         self._name = "Feishu"
 
@@ -133,12 +136,18 @@ class FeishuAdapter(BasePlatformAdapter):
                 log_level=lark.LogLevel.WARNING,
             )
 
+            self._ws.on_reconnecting = self._on_ws_reconnecting
+            self._ws.on_reconnected = self._on_ws_reconnected
+
             self._ws_thread = threading.Thread(
-                target=self._ws.start,
+                target=self._run_ws_client,
                 name="feishu-ws",
                 daemon=True,
             )
             self._ws_thread.start()
+            self._ws_connected = True
+
+            self._watchdog_task = asyncio.create_task(self._health_watchdog())
 
             self._mark_connected()
             logger.info("[Feishu] WebSocket client started for app %s", self._app_id)
@@ -150,6 +159,10 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
 
     async def disconnect(self) -> None:
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+        self._ws_connected = False
         # lark_ws_client does not expose a clean stop(); the daemon thread
         # exits when the process shuts down.
         self._ws = None
@@ -157,6 +170,76 @@ class FeishuAdapter(BasePlatformAdapter):
         self._main_loop = None
         self._mark_disconnected()
         logger.info("[Feishu] Disconnected.")
+
+    def _on_ws_reconnecting(self) -> None:
+        logger.warning("[Feishu] WebSocket disconnected, attempting reconnect...")
+        self._ws_connected = False
+
+    def _on_ws_reconnected(self) -> None:
+        logger.info("[Feishu] WebSocket reconnected successfully")
+        self._ws_connected = True
+
+    def _run_ws_client(self) -> None:
+        """Run ``ws.Client.start()`` with exception capture.
+
+        The SDK caches ``asyncio.get_event_loop()`` at import time as a
+        module-level ``loop`` variable.  When running under uvicorn, that
+        captures the main thread's already-running loop.  The daemon thread
+        then fails with ``RuntimeError: This event loop is already running``
+        when ``start()`` calls ``loop.run_until_complete()``.
+
+        Fix: create a dedicated event loop for this thread and patch the
+        SDK module before calling ``start()``.
+        """
+        try:
+            import lark_oapi.ws.client as ws_mod
+
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            ws_mod.loop = new_loop
+
+            logger.info("[Feishu] WS thread starting (domain=%s)", self._domain)
+            self._ws.start()
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            logger.error("[Feishu] WS thread crashed: %s", error_msg)
+            self._ws_connected = False
+            self._ws_fatal_error = error_msg
+        else:
+            logger.warning("[Feishu] WS thread exited normally (unexpected)")
+            self._ws_connected = False
+            self._ws_fatal_error = "WS thread exited without error"
+
+    async def _health_watchdog(self) -> None:
+        """Periodically check if the WS thread is alive.
+
+        The ``lark_oapi.ws.Client`` runs in a daemon thread with
+        ``auto_reconnect=True``.  If reconnection fails permanently (e.g.
+        revoked credentials), the thread exits silently.  This watchdog
+        detects that and marks the adapter as fatally errored so the UI
+        reflects the true state.
+        """
+        try:
+            first_check = True
+            while self._running:
+                await asyncio.sleep(5 if first_check else 30)
+                first_check = False
+                if not self._running:
+                    break
+                if self._ws_thread is not None and not self._ws_thread.is_alive():
+                    detail = self._ws_fatal_error or "unknown"
+                    logger.error("[Feishu] WebSocket thread died: %s", detail)
+                    self._ws_connected = False
+                    self._set_fatal_error(
+                        "ws_thread_dead",
+                        f"WebSocket connection failed: {detail}",
+                        retryable=True,
+                    )
+                    break
+                if not self._ws_connected:
+                    logger.debug("[Feishu] WS not yet connected (reconnecting...)")
+        except asyncio.CancelledError:
+            pass
 
     # ------------------------------------------------------------------
     # Outbound: send / edit
@@ -285,11 +368,13 @@ class FeishuAdapter(BasePlatformAdapter):
         try:
             event = getattr(data, "event", None)
             if event is None:
+                logger.debug("[Feishu] Event handler called with no event data")
                 return
 
             msg = getattr(event, "message", None)
             sender = getattr(event, "sender", None)
             if msg is None or sender is None:
+                logger.debug("[Feishu] Event missing message or sender — dropping")
                 return
 
             # Skip bot self-messages (sender_type == "app")
@@ -297,13 +382,20 @@ class FeishuAdapter(BasePlatformAdapter):
                 return
 
             message_type = getattr(msg, "message_type", "")
+            message_id = getattr(msg, "message_id", "?")
+            chat_id_raw = getattr(msg, "chat_id", "") or ""
+
+            logger.info(
+                "[Feishu] Received message: id=%s type=%s chat=%s",
+                message_id, message_type, chat_id_raw,
+            )
 
             # First version: only handle text messages
             if message_type != "text":
                 logger.debug(
                     "[Feishu] Ignoring non-text message type=%s message_id=%s",
                     message_type,
-                    getattr(msg, "message_id", "?"),
+                    message_id,
                 )
                 return
 
@@ -335,7 +427,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 message_type=MessageType.TEXT,
                 source=source,
                 message_id=getattr(msg, "message_id", None),
-                reply_to_message_id=getattr(msg, "parent_id", None) or None,
+                reply_to_message_id=getattr(msg, "message_id", None) or None,
                 raw_message={"event": event},
             )
 
@@ -343,8 +435,12 @@ class FeishuAdapter(BasePlatformAdapter):
                 asyncio.run_coroutine_threadsafe(
                     self.handle_message(evt), self._main_loop
                 )
+                logger.debug(
+                    "[Feishu] Dispatched message %s to main loop (user=%s chat=%s)",
+                    message_id, user_id, chat_id,
+                )
             else:
-                logger.warning("[Feishu] No running event loop; dropping message")
+                logger.warning("[Feishu] No running event loop; dropping message %s", message_id)
 
         except Exception as exc:
             logger.exception("[Feishu] Event handler error: %s", exc)
@@ -441,6 +537,7 @@ def register_feishu() -> None:
                     prompt="https://open.feishu.cn",
                     required=False,
                     advanced=True,
+                    sensitive=False,
                 ),
             ],
         )
