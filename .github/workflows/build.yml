@@ -51,6 +51,13 @@ jobs:
         run: |
           mv dist/agent-gateway${{ matrix.ext }} dist/${{ matrix.asset_name }} || move dist/agent-gateway${{ matrix.ext }} dist/${{ matrix.asset_name }}
 
+      - name: Smoke-test frozen binary (adapter SDKs)
+        # The shipped sidecar has no runtime pip — run --check-adapters against
+        # the just-built binary so an SDK that failed to freeze fails the build
+        # here, instead of shipping and reporting "Dependencies not installed"
+        # in production (the Feishu regression class).
+        run: ./dist/${{ matrix.asset_name }} --check-adapters
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

@@ -73,7 +73,12 @@ def register_builtin_adapters() -> None:
     from agent_gateway.adapters.email import register_email
     register_email()
 
-    # Register other built-in adapters (gracefully skipped if deps missing)
+    # Register other built-in adapters. In a dev install an ImportError just
+    # means an optional extra isn't installed (debug). In a frozen build,
+    # though, every builtin adapter's SDK should be frozen — a missing one is a
+    # real defect (the CI ``--check-adapters`` smoke test should have caught it
+    # pre-release), so log it loudly instead of silently dropping the platform.
+    _frozen = getattr(sys, "frozen", False)
     for _name, _module in [
         ("telegram", "agent_gateway.adapters.telegram"),
         ("discord", "agent_gateway.adapters.discord"),
@@ -85,9 +90,62 @@ def register_builtin_adapters() -> None:
             mod = __import__(_module, fromlist=[f"register_{_name}"])
             getattr(mod, f"register_{_name}")()
         except ImportError:
-            logger.debug("Adapter '%s' not available (missing deps)", _name)
+            if _frozen:
+                logger.error(
+                    "Adapter '%s' unavailable in frozen build — its SDK failed "
+                    "to freeze; this should have been caught by --check-adapters",
+                    _name,
+                )
+            else:
+                logger.debug("Adapter '%s' not available (missing deps)", _name)
         except Exception as exc:
             logger.warning("Failed to register adapter '%s': %s", _name, exc)
+
+
+def run_adapter_check() -> int:
+    """Import every built-in adapter and verify its SDK imports in this env.
+
+    Returns 0 when all adapters are importable and report their dependencies as
+    installed, 1 otherwise. Exposed via the ``--check-adapters`` CLI so CI can
+    smoke-test the freshly-built frozen binary: the shipped sidecar has no
+    runtime pip, so an SDK that failed to freeze surfaces here as a hard
+    failure instead of as a "Dependencies not installed" error in production.
+    """
+    # (name, module, deps-check function). Adapter modules import their SDK
+    # lazily (inside _check_*_deps / connect), so importing the module itself
+    # always succeeds — the deps function is what actually probes the SDK.
+    checks = [
+        ("email", "agent_gateway.adapters.email", "_check_email_deps"),
+        ("telegram", "agent_gateway.adapters.telegram", "_check_telegram_deps"),
+        ("discord", "agent_gateway.adapters.discord", "_check_discord_deps"),
+        ("slack", "agent_gateway.adapters.slack", "_check_slack_deps"),
+        ("feishu", "agent_gateway.adapters.feishu", "_check_feishu_deps"),
+        ("webhook", "agent_gateway.adapters.webhook", "_check_webhook_deps"),
+    ]
+    print("[agent-gateway] verifying built-in adapter SDKs...", file=sys.stderr)
+    failures: list[str] = []
+    for name, module_path, deps_attr in checks:
+        try:
+            mod = __import__(module_path, fromlist=[deps_attr])
+            deps_fn = getattr(mod, deps_attr, None)
+            ok = bool(deps_fn()) if callable(deps_fn) else False
+        except Exception as exc:  # noqa: BLE001 — any import-time failure counts
+            print(f"  ✗ {name:<9} import failed: {exc}", file=sys.stderr)
+            failures.append(name)
+            continue
+        if ok:
+            print(f"  ✓ {name:<9} ok", file=sys.stderr)
+        else:
+            print(f"  ✗ {name:<9} dependencies not installed", file=sys.stderr)
+            failures.append(name)
+    if failures:
+        print(
+            f"[agent-gateway] adapter check FAILED for: {', '.join(failures)}",
+            file=sys.stderr,
+        )
+        return 1
+    print("[agent-gateway] all built-in adapter SDKs present", file=sys.stderr)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -189,18 +247,29 @@ def try_create_runner() -> Optional[Any]:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    setup_file_logging()
-    # Move the old ~/.agent_gateway runtime dirs into the unified home before
-    # any adapter/state/cache path is created (idempotent; no-op when done).
-    migrate_legacy_agent_gateway_home()
-
     parser = argparse.ArgumentParser(
         prog="agent_gateway",
         description="Agent Gateway server for nexus-agent integration",
     )
     parser.add_argument("--port", type=int, default=9119, help="Listen port (default: 9119)")
     parser.add_argument("--host", default="127.0.0.1", help="Listen host (default: 127.0.0.1)")
+    parser.add_argument(
+        "--check-adapters",
+        action="store_true",
+        help="Verify every built-in adapter SDK imports, then exit "
+        "(CI smoke-tests the frozen binary with this).",
+    )
     args = parser.parse_args()
+
+    if args.check_adapters:
+        # Smoke-test mode: exit before logging/server setup so CI gets a clean
+        # pass/fail from the freshly-built frozen binary.
+        sys.exit(run_adapter_check())
+
+    setup_file_logging()
+    # Move the old ~/.agent_gateway runtime dirs into the unified home before
+    # any adapter/state/cache path is created (idempotent; no-op when done).
+    migrate_legacy_agent_gateway_home()
 
     # Token auth: read from env or generate a random one
     token = os.environ.get("AGENT_GATEWAY_SESSION_TOKEN", "")

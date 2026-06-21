@@ -25,7 +25,6 @@ import asyncio
 import email as email_lib
 import imaplib
 import logging
-import os
 import re
 import smtplib
 import ssl
@@ -50,6 +49,7 @@ from agent_gateway.core.message import (
 )
 from agent_gateway.core.registry import PlatformEntry, registry
 from agent_gateway.media.cache import MediaCache
+from agent_gateway.adapters._runtime import resolve_credential
 
 logger = logging.getLogger(__name__)
 
@@ -298,19 +298,25 @@ class EmailAdapter(BasePlatformAdapter):
         # nests all YAML fields under "extra".  Flatten so we read from one level.
         cfg = config.get("extra") if isinstance(config.get("extra"), dict) else config
 
-        self._address = cfg.get("address") or os.getenv("EMAIL_ADDRESS", "")
-        self._password = cfg.get("password") or os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = cfg.get("imap_host") or os.getenv("EMAIL_IMAP_HOST", "")
-        self._imap_port = int(cfg.get("imap_port") or os.getenv("EMAIL_IMAP_PORT", "993"))
-        self._smtp_host = cfg.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
-        self._smtp_port = int(cfg.get("smtp_port") or os.getenv("EMAIL_SMTP_PORT", "587"))
-        self._poll_interval = int(cfg.get("poll_interval") or os.getenv("EMAIL_POLL_INTERVAL", "15"))
+        self._address = resolve_credential(cfg.get("address"), env="EMAIL_ADDRESS")
+        self._password = resolve_credential(cfg.get("password"), env="EMAIL_PASSWORD")
+        self._imap_host = resolve_credential(cfg.get("imap_host"), env="EMAIL_IMAP_HOST")
+        self._imap_port = resolve_credential(
+            cfg.get("imap_port"), env="EMAIL_IMAP_PORT", default="993", cast=int
+        )
+        self._smtp_host = resolve_credential(cfg.get("smtp_host"), env="EMAIL_SMTP_HOST")
+        self._smtp_port = resolve_credential(
+            cfg.get("smtp_port"), env="EMAIL_SMTP_PORT", default="587", cast=int
+        )
+        self._poll_interval = resolve_credential(
+            cfg.get("poll_interval"), env="EMAIL_POLL_INTERVAL", default="15", cast=int
+        )
 
         # Skip attachments — configured via gateway.yaml or config dict
         self._skip_attachments = cfg.get("skip_attachments", False)
 
         # Access control — config dict > env var
-        raw_allowed = cfg.get("allowed_users") or os.getenv("EMAIL_ALLOWED_USERS", "")
+        raw_allowed = resolve_credential(cfg.get("allowed_users"), env="EMAIL_ALLOWED_USERS")
         if isinstance(raw_allowed, list):
             self._allowed_users: set[str] = {a.strip().lower() for a in raw_allowed if a.strip()}
         elif isinstance(raw_allowed, str) and raw_allowed.strip():
@@ -318,7 +324,7 @@ class EmailAdapter(BasePlatformAdapter):
         else:
             self._allowed_users = set()
 
-        raw_allow_all = cfg.get("allow_all_users") or os.getenv("EMAIL_ALLOW_ALL_USERS", "")
+        raw_allow_all = resolve_credential(cfg.get("allow_all_users"), env="EMAIL_ALLOW_ALL_USERS")
         self._allow_all_users = str(raw_allow_all).lower() in ("true", "1", "yes")
 
         self._media_cache = MediaCache()

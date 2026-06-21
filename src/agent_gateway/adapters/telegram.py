@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, Optional
 
 from agent_gateway.core.adapter import BasePlatformAdapter
@@ -31,17 +30,14 @@ from agent_gateway.core.message import (
 )
 from agent_gateway.core.registry import PlatformEntry, registry
 from agent_gateway.media.cache import MediaCache
+from agent_gateway.adapters._runtime import resolve_credential, sdk_available
 
 logger = logging.getLogger(__name__)
 
 
 def _check_telegram_deps() -> bool:
     """Check if python-telegram-bot is available."""
-    try:
-        import telegram  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return sdk_available("telegram")
 
 
 class TelegramAdapter(BasePlatformAdapter):
@@ -49,7 +45,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._token = config.get("token") or os.getenv("TELEGRAM_TOKEN", "")
+        self._token = resolve_credential(config.get("token"), env="TELEGRAM_TOKEN")
         self._bot: Any = None
         self._application: Any = None
         self._polling_task: Optional[asyncio.Task] = None

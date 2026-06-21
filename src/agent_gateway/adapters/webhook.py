@@ -26,16 +26,13 @@ from agent_gateway.core.message import (
     SendResult,
 )
 from agent_gateway.core.registry import PlatformEntry, registry
+from agent_gateway.adapters._runtime import sdk_available
 
 logger = logging.getLogger(__name__)
 
 
 def _check_webhook_deps() -> bool:
-    try:
-        import fastapi  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return sdk_available("fastapi")
 
 
 class WebhookAdapter(BasePlatformAdapter):

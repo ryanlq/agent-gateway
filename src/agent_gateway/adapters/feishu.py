@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -46,17 +45,13 @@ from agent_gateway.core.message import (
     SendResult,
 )
 from agent_gateway.core.registry import PlatformEntry, registry
+from agent_gateway.adapters._runtime import resolve_credential, sdk_available
 
 logger = logging.getLogger(__name__)
 
 
 def _check_feishu_deps() -> bool:
-    try:
-        import lark_oapi  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+    return sdk_available("lark_oapi")
 
 
 @dataclass
@@ -87,17 +82,18 @@ class FeishuAdapter(BasePlatformAdapter):
         super().__init__(config)
         extra = config.get("extra", {}) if isinstance(config.get("extra"), dict) else {}
 
-        self._app_id: str = (
-            config.get("token")
-            or extra.get("app_id")
-            or os.getenv("FEISHU_APP_ID", "")
-        ).strip()
-        self._app_secret: str = (
-            extra.get("app_secret") or os.getenv("FEISHU_APP_SECRET", "")
-        ).strip()
-        self._domain: str = (
-            extra.get("domain") or os.getenv("FEISHU_DOMAIN", "https://open.feishu.cn")
-        ).strip()
+        self._app_id: str = resolve_credential(
+            config.get("token"), extra.get("app_id"), env="FEISHU_APP_ID", strip=True
+        )
+        self._app_secret: str = resolve_credential(
+            extra.get("app_secret"), env="FEISHU_APP_SECRET", strip=True
+        )
+        self._domain: str = resolve_credential(
+            extra.get("domain"),
+            env="FEISHU_DOMAIN",
+            default="https://open.feishu.cn",
+            strip=True,
+        )
 
         self._client: Any = None  # lark_oapi.Client (HTTP API)
         self._ws: Any = None  # lark_oapi.ws.Client

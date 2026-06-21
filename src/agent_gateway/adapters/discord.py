@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, Optional
 
 from agent_gateway.core.adapter import BasePlatformAdapter
@@ -28,16 +27,13 @@ from agent_gateway.core.message import (
     SendResult,
 )
 from agent_gateway.core.registry import PlatformEntry, registry
+from agent_gateway.adapters._runtime import resolve_credential, sdk_available
 
 logger = logging.getLogger(__name__)
 
 
 def _check_discord_deps() -> bool:
-    try:
-        import discord  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return sdk_available("discord")
 
 
 class DiscordAdapter(BasePlatformAdapter):
@@ -45,7 +41,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._token = config.get("token") or os.getenv("DISCORD_TOKEN", "")
+        self._token = resolve_credential(config.get("token"), env="DISCORD_TOKEN")
         self._client: Any = None
         self._name = "Discord"
 
