@@ -36,7 +36,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[desktop]"
+          # Install every platform extra so PyInstaller can freeze all adapter
+          # SDKs (lark-oapi, telegram, discord, slack, …) into the sidecar.
+          # The shipped binary has no runtime pip — adapters the UI exposes
+          # must be bundled at build time or they report
+          # "Dependencies not installed" in production.
+          pip install -e ".[all]"
           pip install pyinstaller
 
       - name: Build executable
