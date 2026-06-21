@@ -4,7 +4,9 @@ Adapters use this to persist their position cursors (last processed
 message ID, update offset, etc.) so backlog recovery can pick up
 where it left off after a gateway restart.
 
-State files live under ``~/.agent_gateway/state/<platform>.json``.
+State files live under ``<home>/state/<platform>.json`` (see
+:func:`agent_gateway.utils.paths.resolve_home`; defaults to
+``~/.nexus-agent/state``).
 """
 
 from __future__ import annotations
@@ -14,9 +16,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from agent_gateway.utils.paths import resolve_home
+
 logger = logging.getLogger(__name__)
 
-_STATE_DIR = Path.home() / ".agent_gateway" / "state"
+_STATE_DIR = resolve_home() / "state"
 
 
 def _ensure_dir() -> Path:

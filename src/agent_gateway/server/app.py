@@ -1194,14 +1194,9 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
 
     @app.get("/api/logs")
     async def rest_logs(request: Request) -> dict[str, Any]:
-        from pathlib import Path as _Path
-        import os as _os
+        from agent_gateway.utils.paths import resolve_home
 
-        env_home = _os.environ.get("NEXUS_AGENT_HOME")
-        log_dir = (
-            _Path(env_home) / "logs" if env_home
-            else _Path.home() / ".nexus-agent" / "logs"
-        )
+        log_dir = resolve_home() / "logs"
 
         file_param = request.query_params.get("file", "agent")
         lines_param = int(request.query_params.get("lines", "200"))
@@ -1239,14 +1234,9 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
 
     @app.delete("/api/logs")
     async def rest_logs_clear(request: Request) -> dict[str, Any]:
-        from pathlib import Path as _Path
-        import os as _os
+        from agent_gateway.utils.paths import resolve_home
 
-        env_home = _os.environ.get("NEXUS_AGENT_HOME")
-        log_dir = (
-            _Path(env_home) / "logs" if env_home
-            else _Path.home() / ".nexus-agent" / "logs"
-        )
+        log_dir = resolve_home() / "logs"
 
         file_param = request.query_params.get("file", "agent")
         file_map = {

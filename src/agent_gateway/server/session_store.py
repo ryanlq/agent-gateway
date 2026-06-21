@@ -18,13 +18,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_gateway.utils.paths import resolve_home
+
 logger = logging.getLogger(__name__)
 
 # Cap per-session history to prevent unbounded JSON growth.
 _MAX_HISTORY_PER_SESSION = 500
 
 # Default directory for persistent data.
-_DEFAULT_STORE_DIR = os.path.expanduser("~/.nexus-agent")
+_DEFAULT_STORE_DIR = str(resolve_home())
 
 
 @dataclass

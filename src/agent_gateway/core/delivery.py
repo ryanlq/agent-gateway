@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from agent_gateway.utils.paths import resolve_home
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ class DeliveryRouter:
             filter_silence: Whether to drop silence-narration outbound.
         """
         self.adapters = adapters
-        self.output_dir = output_dir or Path.home() / ".agent_gateway" / "output"
+        self.output_dir = output_dir or resolve_home() / "output"
         self.filter_silence = filter_silence
 
     async def deliver(

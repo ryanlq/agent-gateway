@@ -22,10 +22,13 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from agent_gateway.utils.paths import migrate_legacy_agent_gateway_home, resolve_home
+
 logger = logging.getLogger(__name__)
 
-# Directory for persistent data and config
-_NEXUS_AGENT_DIR = Path.home() / ".nexus-agent"
+# Directory for persistent data and config (derived from the central resolver
+# so NEXUS_AGENT_HOME overrides everything at once).
+_NEXUS_AGENT_DIR = resolve_home()
 
 
 # ---------------------------------------------------------------------------
@@ -33,18 +36,8 @@ _NEXUS_AGENT_DIR = Path.home() / ".nexus-agent"
 # ---------------------------------------------------------------------------
 
 def _resolve_log_dir() -> Path:
-    """Resolve the gateway's own log directory.
-
-    ``NEXUS_AGENT_HOME`` (set by the desktop, tests, or the user) overrides the
-    default; otherwise logs go under ``~/.nexus-agent/logs`` — co-located with
-    the gateway's persisted sessions (``~/.nexus-agent/sessions.json``) so the
-    gateway's data is self-contained and no longer leaks into the legacy
-    ``~/.hermes`` tree left over from the upstream Hermes project.
-    """
-    env_home = os.environ.get("NEXUS_AGENT_HOME")
-    if env_home:
-        return Path(env_home) / "logs"
-    return Path.home() / ".nexus-agent" / "logs"
+    """Gateway log directory: ``<home>/logs`` (see :func:`resolve_home`)."""
+    return resolve_home() / "logs"
 
 
 LOG_DIR = _resolve_log_dir()
@@ -197,6 +190,9 @@ def try_create_runner() -> Optional[Any]:
 
 def main() -> None:
     setup_file_logging()
+    # Move the old ~/.agent_gateway runtime dirs into the unified home before
+    # any adapter/state/cache path is created (idempotent; no-op when done).
+    migrate_legacy_agent_gateway_home()
 
     parser = argparse.ArgumentParser(
         prog="agent_gateway",

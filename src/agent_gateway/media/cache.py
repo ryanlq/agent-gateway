@@ -20,10 +20,12 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from agent_gateway.utils.paths import resolve_home
+
 logger = logging.getLogger(__name__)
 
 # Default cache root
-_DEFAULT_CACHE_ROOT = Path.home() / ".agent_gateway" / "cache"
+_DEFAULT_CACHE_ROOT = resolve_home() / "cache"
 
 # Recognised file extensions
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
