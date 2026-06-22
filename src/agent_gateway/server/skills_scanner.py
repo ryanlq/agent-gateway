@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _SKILLS_DIR_MAP: dict[str, Any] = {
     "claude-code": lambda: Path.home() / ".claude" / "skills",
+    "claude-code-sdk": lambda: Path.home() / ".claude" / "skills",
     "pi": lambda: Path.home() / ".pi" / "agent" / "skills",
 }
 
