@@ -15,9 +15,13 @@ logger = logging.getLogger(__name__)
 
 # Lazy imports to avoid hard dependency on all bridges
 _AGENT_REGISTRY: dict[str, str] = {
-    "claude-code": "agent_gateway.agents.claude_code:ClaudeCodeBridge",
     "claude-code-sdk": "agent_gateway.agents.claude_code_sdk:ClaudeCodeSdkBridge",
     "pi": "agent_gateway.agents.pi_agent:PiAgentBridge",
+}
+
+# Backward compat: existing sessions persisted with "claude-code" upgrade to SDK.
+_AGENT_ALIASES: dict[str, str] = {
+    "claude-code": "claude-code-sdk",
 }
 
 
@@ -57,7 +61,7 @@ def create_bridge(agent_type: str, **kwargs: object) -> CLIAgentBridge:
     Parameters
     ----------
     agent_type :
-        One of ``"claude-code"``, ``"pi"``.
+        One of ``"claude-code-sdk"``, ``"pi"``.
     **kwargs :
         Forwarded to the bridge constructor (with automatic type coercion).
 
@@ -65,7 +69,8 @@ def create_bridge(agent_type: str, **kwargs: object) -> CLIAgentBridge:
     -------
     CLIAgentBridge
     """
-    entry = _AGENT_REGISTRY.get(agent_type)
+    resolved = _AGENT_ALIASES.get(agent_type, agent_type)
+    entry = _AGENT_REGISTRY.get(resolved)
     if entry is None:
         available = ", ".join(sorted(_AGENT_REGISTRY))
         raise ValueError(f"Unknown agent type '{agent_type}'. Available: {available}")

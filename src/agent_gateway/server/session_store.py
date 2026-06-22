@@ -168,7 +168,7 @@ class SessionStore:
         self,
         *,
         session_id: str,
-        agent_type: str = "claude-code",
+        agent_type: str = "claude-code-sdk",
         workspace: str | None = None,
         backend_session_ref: str | None = None,
         model: str | None = None,

@@ -707,7 +707,7 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
 
     @app.get("/api/model/recommended-default")
     async def rest_model_recommended_default(request: Request) -> dict[str, Any]:
-        return {"provider": "claude-code", "model": "claude-sonnet-4-6",
+        return {"provider": "claude-code-sdk", "model": "claude-sonnet-4-6",
                 "free_tier": None}
 
     # -- Env ---------------------------------------------------------------

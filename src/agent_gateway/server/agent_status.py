@@ -15,54 +15,6 @@ logger = logging.getLogger(__name__)
 
 # Agent metadata registry
 _AGENT_META: dict[str, dict[str, Any]] = {
-    "claude-code": {
-        "name": "Claude Code",
-        "description": "Anthropic's coding agent. Uses Claude Sonnet / Opus models.",
-        "cli_command": "claude",
-        "docs_url": "https://docs.anthropic.com/en/docs/claude-code",
-        "install_hint": "npm install -g @anthropic-ai/claude-code",
-        "params": [
-            {
-                "key": "model",
-                "label": "Model",
-                "type": "select",
-                "options": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
-                "default": "claude-sonnet-4-6",
-                "description": "Claude model to use for responses.",
-            },
-            {
-                "key": "bare",
-                "label": "Bare Mode",
-                "type": "toggle",
-                "default": "false",
-                "description": "极简模式：跳过工具、技能、上下文加载，节省 token。适合简单问答。",
-            },
-            {
-                "key": "max_turns",
-                "label": "Max Turns",
-                "type": "number",
-                "default": "10",
-                "min": 1,
-                "max": 50,
-                "description": "最大 agentic 轮数。1=纯对话无工具，5-10=允许读文件/搜索等，50=复杂任务。",
-            },
-            {
-                "key": "permission_mode",
-                "label": "Permission Mode",
-                "type": "select",
-                "options": ["default", "auto", "bypassPermissions"],
-                "default": "default",
-                "description": "工具授权模式。default=每次询问，auto=自动批准大部分操作，bypassPermissions=跳过所有检查（仅限沙箱环境）。",
-            },
-            {
-                "key": "allowed_tools",
-                "label": "Allowed Tools",
-                "type": "text",
-                "default": "",
-                "description": "允许免授权执行的工具白名单，逗号分隔。如: Bash(git *), Edit, Read。需配合 permission_mode 使用。",
-            },
-        ],
-    },
     "claude-code-sdk": {
         "name": "Claude Code (SDK)",
         "description": "Official Python SDK wrapper for Claude Code. Structured events, reliable error feedback, Max plan compatible.",

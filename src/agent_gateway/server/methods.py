@@ -531,7 +531,7 @@ async def handle_commands_catalog(
         "pairs": [
             ["/new", "Start a new session"],
             ["/reset", "Reset current session history"],
-            ["/agent", "Switch agent type: /agent <claude-code|pi>"],
+            ["/agent", "Switch agent type: /agent <claude-code-sdk|pi>"],
             ["/help", "Show available commands"],
         ],
     }
@@ -549,7 +549,7 @@ async def handle_config_get(
     """Return current configuration."""
     return {
         "default_agent": sessions.default_agent_type,
-        "available_agents": ["claude-code", "pi"],
+        "available_agents": ["claude-code-sdk", "pi"],
     }
 
 
@@ -633,7 +633,7 @@ async def handle_tools_list(
         "toolsets": [
             {
                 "name": "agent-tools",
-                "description": "Tools provided by the active agent (claude-code / pi)",
+                "description": "Tools provided by the active agent (claude-code-sdk / pi)",
                 "tool_count": 0,
                 "enabled": True,
                 "tools": [],
@@ -771,7 +771,7 @@ async def handle_prompts_delete(
 _BUILTIN_COMMANDS = {
     "new": "Create a new session",
     "reset": "Reset current session history",
-    "agent": "Switch agent type: /agent <claude-code|pi>",
+    "agent": "Switch agent type: /agent <claude-code-sdk|pi>",
     "help": "Show available commands",
     "cron": "Manage cron jobs: /cron list|create|delete|pause|resume|trigger",
     "jobs": "List cron jobs (alias for /cron list)",

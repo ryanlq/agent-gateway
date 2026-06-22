@@ -72,7 +72,7 @@ class SessionManager:
 
     def __init__(
         self,
-        default_agent_type: str = "claude-code",
+        default_agent_type: str = "claude-code-sdk",
         session_store: SessionStore | None = None,
     ) -> None:
         self._sessions: dict[str, DesktopSession] = {}

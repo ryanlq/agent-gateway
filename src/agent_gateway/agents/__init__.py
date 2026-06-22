@@ -4,16 +4,15 @@ gateway's agent interface.
 
 Bridges available:
 
-  - ``ClaudeCodeBridge`` — Anthropic Claude Code CLI (``claude --print``)
+  - ``ClaudeCodeSdkBridge`` — Anthropic Claude Code via official Python SDK
   - ``PiAgentBridge`` — Pi Agent RPC mode (``pi --mode rpc``)
 
 Usage::
 
-    from agent_gateway.agents import ClaudeCodeBridge
+    from agent_gateway.agents import ClaudeCodeSdkBridge
 
-    bridge = ClaudeCodeBridge(model="claude-sonnet-4-6")
+    bridge = ClaudeCodeSdkBridge(model="claude-sonnet-4-6")
     runner = GatewayRunner(config, agent=bridge)
-    # or: runner = GatewayRunner(config, agent_callback=bridge.as_callback())
 """
 
 from agent_gateway.agents.events import AgentEvent
@@ -29,27 +28,21 @@ from agent_gateway.agents.base import (
     SubprocessConfig,
     SubprocessPool,
 )
-from agent_gateway.agents.claude_code import ClaudeCodeBridge
 from agent_gateway.agents.claude_code_sdk import ClaudeCodeSdkBridge
 from agent_gateway.agents.pi_agent import PiAgentBridge
 
 __all__ = [
-    # Bridges
     "CLIAgentBridge",
-    "ClaudeCodeBridge",
     "ClaudeCodeSdkBridge",
     "PiAgentBridge",
-    # Infrastructure
     "SubprocessConfig",
     "SubprocessPool",
     "PooledProcess",
-    # Exceptions
     "CLIAgentError",
     "CLICrashError",
     "CLIConnectionError",
     "CLIOutputTooLargeError",
     "CLIParseError",
     "CLITimeoutError",
-    # Structured event protocol
     "AgentEvent",
 ]

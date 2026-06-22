@@ -7,9 +7,9 @@ that ``GatewayRunner`` expects.
 
 Usage::
 
-    from agent_gateway.agents import ClaudeCodeBridge
+    from agent_gateway.agents import ClaudeCodeSdkBridge
 
-    bridge = ClaudeCodeBridge()
+    bridge = ClaudeCodeSdkBridge()
     runner = GatewayRunner(config, agent=bridge)
     # or: runner = GatewayRunner(config, agent_callback=bridge.as_callback())
 """
