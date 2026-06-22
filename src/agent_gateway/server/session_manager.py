@@ -281,7 +281,6 @@ class SessionManager:
         if s.fast is not None:
             updates["fast"] = s.fast
         self._store.update(session_id, **updates)
-        self._store.auto_title(session_id)
 
     async def generate_title(
         self,
