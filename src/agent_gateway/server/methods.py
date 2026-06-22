@@ -453,6 +453,18 @@ async def _run_prompt(
     # Persist to file store
     sessions.persist_session(session_id)
 
+    # Fire-and-forget: generate a title using the agent bridge once the
+    # session has accumulated enough context (2+ exchanges = 4 messages).
+    # bridge.chat() spawns an independent subprocess, so it never touches
+    # the in-flight prompt's captured_cli_session_id.
+    if not session.title and len(session.history) >= 4:
+        async def _bg_title():
+            try:
+                await sessions.generate_title(session_id, emit=emit)
+            except Exception as exc:
+                logger.debug("Background title generation failed: %s", exc)
+        asyncio.create_task(_bg_title())
+
     # Push cron confirmation as a follow-up if any operations were executed
     if cron_confirm_text:
         await emit("message.delta", {"text": cron_confirm_text}, session_id)

@@ -99,6 +99,10 @@ async def test_truncate_resets_history_and_reseeds(tmp_path):
     ]
     session.cli_session_id = "old"
     seen = _stub_stream(session.bridge, ["fresh"], capture_value="new-id")
+    # Stub chat to prevent background title generation (8 msgs triggers it)
+    async def _fake_chat(**kw):
+        return "Fake Title"
+    session.bridge.chat = _fake_chat
     emit = _Collector()
 
     await _run_prompt(session.session_id, "edited-u3", session, emit, mgr,

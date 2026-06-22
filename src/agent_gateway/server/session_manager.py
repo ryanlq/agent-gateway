@@ -283,6 +283,70 @@ class SessionManager:
         self._store.update(session_id, **updates)
         self._store.auto_title(session_id)
 
+    async def generate_title(
+        self,
+        session_id: str,
+        emit: Any = None,
+    ) -> str | None:
+        """Generate a session title using the agent bridge.
+
+        Uses ``bridge.chat()`` for an independent one-shot subprocess call
+        that does not interfere with the in-flight streaming prompt (same
+        pattern as the cron natural-language parser). Falls back to the
+        first user message on any failure.
+
+        Args:
+            session_id: The session to title.
+            emit: Optional async callback to push ``session.info`` events
+                to the frontend once the title is set.
+        """
+        session = self._sessions.get(session_id)
+        if session is None or session.title:
+            return session.title if session else None
+
+        if len(session.history) < 4:
+            return None
+
+        conversation = []
+        for msg in session.history[:8]:
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            content = str(msg.get("content", ""))[:200]
+            conversation.append(f"{role}: {content}")
+        conversation_text = "\n".join(conversation)
+
+        prompt = (
+            "Generate a concise title (under 15 words) for this conversation. "
+            "Output ONLY the title text, nothing else. "
+            "Use the same language as the conversation.\n\n"
+            f"{conversation_text}"
+        )
+
+        try:
+            title = (await session.bridge.chat(
+                session_key=f"{session_id}:title",
+                message=prompt,
+                history=[],
+                system_extra="",
+            )).strip().strip('"\'').strip()
+            if len(title) > 60:
+                title = title[:60]
+            if not title:
+                raise ValueError("empty title")
+        except Exception as exc:
+            logger.debug("Agent title generation failed for %s: %s", session_id, exc)
+            title = self._store.auto_title(session_id) if self._store else None
+            return title
+
+        session.title = title
+        self.persist_session(session_id)
+
+        if emit:
+            from agent_gateway.server.methods import _session_info
+            await emit("session.info", _session_info(session), session_id)
+
+        logger.info("Generated title for session %s: %s", session_id, title)
+        return title
+
     def list_sessions(self) -> list[DesktopSession]:
         """Return all active sessions."""
         return list(self._sessions.values())
