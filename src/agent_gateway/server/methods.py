@@ -526,14 +526,15 @@ async def handle_commands_catalog(
     emit: Any,
     sessions: SessionManager,
 ) -> dict[str, Any]:
-    """Return available slash commands."""
+    """Return available slash commands.
+
+    Derived from ``_BUILTIN_COMMANDS`` so the desktop ``/`` menu is the single
+    source of truth — a command registered there (and handled in
+    ``handle_slash_exec``) automatically appears in the menu. Previously this
+    hardcoded only four entries, silently hiding /cron /jobs /schedule.
+    """
     return {
-        "pairs": [
-            ["/new", "Start a new session"],
-            ["/reset", "Reset current session history"],
-            ["/agent", "Switch agent type: /agent <claude-code-sdk|pi>"],
-            ["/help", "Show available commands"],
-        ],
+        "pairs": [[f"/{name}", desc] for name, desc in _BUILTIN_COMMANDS.items()],
     }
 
 
@@ -776,6 +777,7 @@ _BUILTIN_COMMANDS = {
     "cron": "Manage cron jobs: /cron list|create|delete|pause|resume|trigger",
     "jobs": "List cron jobs (alias for /cron list)",
     "schedule": "Quick create: /schedule <schedule> <prompt>",
+    "loop": "Run a prompt on a recurring interval: /loop <interval> <prompt>",
 }
 
 
@@ -1099,6 +1101,21 @@ async def handle_slash_exec(
         if not _cron_manager:
             return {"warning": "Cron system is not available."}
         return await _handle_cron_command(f"create {cmd_arg}", session_id, sessions, emit)
+
+    # -- /loop <interval> <prompt> (recurring cron create) ------------------
+    # /loop forces RECURRING semantics: a bare "10m" becomes "every 10m",
+    # whereas /schedule treats "10m" as a one-shot. Shares parse_loop_args with
+    # the IM path (core/runner.py) so both surfaces parse identically.
+    if cmd_name == "loop":
+        if not _cron_manager:
+            return {"warning": "Cron system is not available."}
+        from agent_gateway.core.commands import parse_loop_args
+
+        try:
+            schedule, prompt = parse_loop_args(cmd_arg)
+        except ValueError as exc:
+            return {"warning": str(exc)}
+        return _do_create_cron_job(schedule, prompt)
 
     return {"warning": f"Unknown command: /{cmd_name}"}
 

@@ -750,6 +750,7 @@ class GatewayRunner:
             "cron": self._cmd_cron,
             "jobs": self._cmd_jobs,
             "schedule": self._cmd_schedule,
+            "loop": self._cmd_loop,
         }
 
         handler = handlers.get(command)
@@ -784,7 +785,8 @@ class GatewayRunner:
             "/cron resume <id> — Resume cron job\n"
             "/cron trigger <id> — Trigger immediate run\n"
             "/jobs — List cron jobs (alias)\n"
-            "/schedule <schedule> <prompt> — Quick create (alias)\n"
+            "/schedule <schedule> <prompt> — Quick create (one-shot) (alias)\n"
+            "/loop <interval> <prompt> — Recurring task (e.g. /loop 10m check deploy)\n"
             "/help — This message"
         )
 
@@ -848,6 +850,49 @@ class GatewayRunner:
             return "⚠️ Cron system is not available."
         args = event.get_command_args().strip()
         return await self._cron_create(args, event)
+
+    async def _cmd_loop(self, event: MessageEvent) -> str:
+        """``/loop <interval> <prompt>`` — recurring cron create.
+
+        Unlike ``/schedule``, /loop forces RECURRING semantics: a bare ``10m``
+        becomes ``every 10m``. Shares ``parse_loop_args`` with the desktop path
+        (server/methods.py). Calls ``create_job`` directly rather than delegating
+        to ``_cron_create``, whose ``split(maxsplit=1)`` mangles ``every 10m``.
+        """
+        if not self.cron_manager:
+            return "⚠️ Cron system is not available."
+        from agent_gateway.core.commands import parse_loop_args
+
+        try:
+            schedule, prompt = parse_loop_args(event.get_command_args())
+        except ValueError as exc:
+            return f"⚠️ {exc}"
+
+        origin = self._cron_origin(event)
+        deliver = "local"
+        if origin:
+            parts = [origin["platform"]]
+            if origin.get("chat_id"):
+                parts.append(str(origin["chat_id"]))
+            if origin.get("thread_id"):
+                parts.append(str(origin["thread_id"]))
+            deliver = ":".join(parts)
+
+        try:
+            job = self.cron_manager.create_job(
+                prompt=prompt, schedule=schedule, deliver=deliver, origin=origin,
+            )
+        except ValueError as exc:
+            return f"❌ 创建失败: {exc}"
+        except Exception as exc:
+            return f"❌ 创建失败: {exc}"
+
+        return (
+            f"🔁 已创建循环任务 \"{job.get('name', 'cron job')}\"\n"
+            f"• ID: {job.get('id', '?')}\n"
+            f"• 计划: {job.get('schedule_display', schedule)}\n"
+            f"• 下次执行: {job.get('next_run_at', '?')}"
+        )
 
     # -- Cron helpers -------------------------------------------------------
 
