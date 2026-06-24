@@ -264,16 +264,83 @@ def _build_job_prompt(job: dict) -> Optional[str]:
     return prompt
 
 
+def _build_loop_system_extra(job: dict) -> str:
+    """System-prompt guidance that makes a recurring loop self-aware and able
+    to terminate itself.
+
+    Injected via ``bridge.chat(system_extra=...)`` (the agent's
+    ``--append-system-prompt`` flag). Without this a loop agent has no idea it
+    is iterating, does not know its own job_id, and cannot stop — so a loop
+    runs forever until a human intervenes. Returns "" for one-shots.
+    """
+    schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+    if schedule.get("kind") not in {"cron", "interval"}:
+        return ""  # one-shots don't loop
+
+    job_id = job.get("id", "")
+    repeat = job.get("repeat") if isinstance(job.get("repeat"), dict) else {}
+    completed = repeat.get("completed", 0)
+    times = repeat.get("times")
+    iteration = completed + 1  # the run about to happen
+
+    head = (
+        "You are running as ONE ITERATION of a recurring loop (a scheduled "
+        "cron job that fires repeatedly). Each iteration is independent — you "
+        "have no memory of prior runs. This is iteration "
+        f"{iteration}" + (f" of {times}." if times else ".")
+    )
+
+    stop_condition = str(job.get("stop_condition") or "").strip()
+    if stop_condition:
+        stop_clause = (
+            "STOP CONDITION — the loop should end once this is true:\n"
+            f'"{stop_condition}"\n'
+            "Evaluate it against your latest findings THIS iteration. If it is "
+            "satisfied, you MUST terminate the loop now by emitting the "
+            "cron-operation block below."
+        )
+    else:
+        stop_clause = (
+            "No explicit stop condition was set. Still, if the loop's goal is "
+            "fully achieved and further iterations would add nothing, you MAY "
+            "terminate it by emitting the cron-operation block below."
+        )
+
+    terminate_block = (
+        "To terminate this loop, output this exact block — the gateway parses "
+        "and executes it, then stops scheduling further runs:\n"
+        "```\n"
+        "<!--CRON_OPERATION\n"
+        "```json\n"
+        "{\n"
+        '  "action": "pause_job",\n'
+        f'  "params": {{"job_id": "{job_id}"}}\n'
+        "}\n"
+        "```\n"
+        "-->\n"
+        "```\n"
+        "Only emit it when the loop should genuinely stop; otherwise just do "
+        "the task and produce your normal report."
+    )
+
+    return "\n\n".join([head, stop_clause, terminate_block])
+
+
+
 # =============================================================================
 # Job execution
 # =============================================================================
 
 
-async def _execute_agent(store: Any, job: dict, prompt: str) -> str:
+async def _execute_agent(
+    store: Any, job: dict, prompt: str, system_extra: str = ""
+) -> str:
     """Run the configured AI agent with the given prompt.
 
     Uses ``create_bridge()`` from the agent factory to spawn the agent,
-    calls ``bridge.chat()``, then shuts down cleanly.
+    calls ``bridge.chat()``, then shuts down cleanly. ``system_extra`` is
+    appended to the agent's system prompt (used to give loops self-awareness
+    and a self-termination path).
     """
     from agent_gateway.server.agent_factory import create_bridge
 
@@ -288,6 +355,7 @@ async def _execute_agent(store: Any, job: dict, prompt: str) -> str:
             session_key=f"cron_{job_id}",
             message=prompt,
             history=[],
+            system_extra=system_extra,
         )
         return result or ""
     finally:
@@ -297,8 +365,17 @@ async def _execute_agent(store: Any, job: dict, prompt: str) -> str:
             pass
 
 
-async def run_job(store: Any, job: dict) -> tuple[bool, str, str, Optional[str]]:
+async def run_job(
+    store: Any, job: dict, cron_manager: Any = None
+) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job.
+
+    ``cron_manager`` enables the agent self-control protocol: when provided,
+    any ``<!--CRON_OPERATION ... -->`` blocks the agent emits (e.g. a loop
+    self-terminating via ``pause_job``) are parsed and executed against the
+    manager. Without it the scheduler path saved such blocks verbatim and
+    never acted on them — only the interactive chat paths (runner.py /
+    methods.py) did the parsing.
 
     Returns:
         Tuple of (success, full_output_doc, final_response, error_message)
@@ -396,12 +473,37 @@ async def run_job(store: Any, job: dict) -> tuple[bool, str, str, Optional[str]]
                 pass
 
         final_response = await asyncio.wait_for(
-            _execute_agent(store, job, prompt),
+            _execute_agent(store, job, prompt, system_extra=_build_loop_system_extra(job)),
             timeout=cron_timeout if cron_timeout > 0 else None,
         )
 
         if final_response.strip() == "(No response generated)":
             final_response = ""
+
+        # Post-process: execute any <!--CRON_OPERATION ...--> blocks the agent
+        # embedded (e.g. a loop self-terminating via pause_job). Mirrors the
+        # interactive chat paths in core/runner.py and server/methods.py.
+        # Without this the scheduler saved the blocks verbatim and never acted
+        # on them, so loops could only end via the max_runs cap.
+        if cron_manager and final_response:
+            try:
+                from agent_gateway.core.cron_tool import CronToolParser, CronToolExecutor
+
+                ops = CronToolParser.extract_operations(final_response)
+                if ops:
+                    executor = CronToolExecutor(cron_manager)
+                    results = await executor.execute_all(
+                        ops, origin=None, session_key=f"cron_{job_id}"
+                    )
+                    final_response = CronToolParser.replace_operations(final_response, results)
+                    logger.info(
+                        "Processed %d cron operation(s) emitted by job '%s'",
+                        len(ops), job_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Cron tool post-processing failed for job '%s': %s", job_id, exc
+                )
 
         logged_response = final_response if final_response else "(No response generated)"
 
@@ -612,7 +714,9 @@ async def _deliver_result(
 # =============================================================================
 
 
-async def tick(store: Any, verbose: bool = True, runner: Any = None) -> int:
+async def tick(
+    store: Any, verbose: bool = True, runner: Any = None, cron_manager: Any = None
+) -> int:
     """Check and run all due jobs.
 
     Uses a file lock so only one tick runs at a time.
@@ -621,6 +725,10 @@ async def tick(store: Any, verbose: bool = True, runner: Any = None) -> int:
         store: SessionStore for resolving agent config.
         verbose: Whether to log status messages.
         runner: Optional ``GatewayRunner`` for platform adapter delivery.
+        cron_manager: Optional ``CronManager`` enabling the agent self-control
+            protocol — lets a running job emit ``<!--CRON_OPERATION ... -->``
+            blocks (e.g. a loop pausing itself) that the scheduler then
+            executes. The manager passes itself here from ``_tick_loop``.
 
     Returns:
         Number of jobs executed (0 if another tick is already running).
@@ -660,7 +768,9 @@ async def tick(store: Any, verbose: bool = True, runner: Any = None) -> int:
         async def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
             try:
-                success, output, final_response, error = await run_job(store, job)
+                success, output, final_response, error = await run_job(
+                    store, job, cron_manager=cron_manager
+                )
 
                 save_job_output(job["id"], output)
 

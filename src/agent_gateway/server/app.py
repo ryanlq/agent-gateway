@@ -1048,6 +1048,9 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         """Map internal job dict to the frontend CronJob type."""
         if job is None:
             return {}
+        schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+        repeat = job.get("repeat") if isinstance(job.get("repeat"), dict) else {}
+        is_loop = schedule.get("kind") in {"cron", "interval"}
         return {
             "id": job.get("id", ""),
             "name": job.get("name") or None,
@@ -1063,6 +1066,11 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
             "next_run_at": job.get("next_run_at") or None,
             "no_agent": job.get("no_agent", False),
             "context_from": job.get("context_from") or [],
+            # Loop termination: max_runs (None = unlimited) only meaningful for
+            # recurring jobs; completed = successful iterations so far.
+            "max_runs": repeat.get("times") if is_loop else None,
+            "completed": repeat.get("completed", 0),
+            "stop_condition": job.get("stop_condition") or None,
         }
 
     @app.get("/api/cron/jobs")
@@ -1081,6 +1089,8 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
                 script=body.get("script"),
                 no_agent=body.get("no_agent", False),
                 context_from=body.get("context_from"),
+                max_runs=body.get("max_runs"),
+                stop_condition=body.get("stop_condition"),
             )
             return _job_to_api(job)
         except Exception as e:
@@ -1092,6 +1102,11 @@ def create_app(token: str, runner: Any = None, cron_manager: Any = None) -> Fast
         if not job:
             return JSONResponse(status_code=404, content={"error": "Job not found"})
         return _job_to_api(job)
+
+    @app.get("/api/cron/jobs/{job_id}/output")
+    async def rest_cron_job_output(job_id: str) -> list:
+        """Per-tick outputs for a job (newest-first). Powers the Loops panel."""
+        return cron_manager.list_job_outputs(job_id)
 
     @app.patch("/api/cron/jobs/{job_id}")
     async def rest_cron_update(job_id: str, request: Request) -> dict[str, Any]:

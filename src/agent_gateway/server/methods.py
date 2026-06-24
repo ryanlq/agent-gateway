@@ -928,7 +928,13 @@ async def _cron_create_from_desktop(
     return await _cron_create_via_agent(args, session_id, sessions, emit)
 
 
-def _do_create_cron_job(schedule: str, prompt: str, name: str = None) -> dict[str, Any]:
+def _do_create_cron_job(
+    schedule: str,
+    prompt: str,
+    name: str = None,
+    max_runs: int = None,
+    stop_condition: str = None,
+) -> dict[str, Any]:
     """Actually create a cron job via CronManager."""
     try:
         job = _cron_manager.create_job(
@@ -936,6 +942,8 @@ def _do_create_cron_job(schedule: str, prompt: str, name: str = None) -> dict[st
             schedule=schedule,
             name=name,
             deliver="local",
+            max_runs=max_runs,
+            stop_condition=stop_condition,
         )
     except ValueError as e:
         return {"warning": f"❌ 创建失败: {e}"}
@@ -1112,10 +1120,10 @@ async def handle_slash_exec(
         from agent_gateway.core.commands import parse_loop_args
 
         try:
-            schedule, prompt = parse_loop_args(cmd_arg)
+            schedule, prompt, max_runs = parse_loop_args(cmd_arg)
         except ValueError as exc:
             return {"warning": str(exc)}
-        return _do_create_cron_job(schedule, prompt)
+        return _do_create_cron_job(schedule, prompt, max_runs=max_runs)
 
     return {"warning": f"Unknown command: /{cmd_name}"}
 

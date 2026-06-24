@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from typing import Optional
 
 # Bare duration token: 10m, 2h, 1d, 45s
 _DURATION_RE = re.compile(r"^\d+[smhd]$", re.IGNORECASE)
@@ -61,13 +62,16 @@ def normalize_loop_schedule(interval: str) -> str:
     )
 
 
-def parse_loop_args(args: str) -> tuple[str, str]:
-    """Parse ``<interval> <prompt>`` for ``/loop``.
+def parse_loop_args(args: str) -> tuple[str, str, Optional[int]]:
+    """Parse ``<interval> [--max N] <prompt>`` for ``/loop``.
 
-    Returns ``(recurring_schedule, prompt)``. Uses ``shlex.split`` so a quoted
-    cron expression (``"*/10 * * * *"``) survives as one interval token.
+    Returns ``(recurring_schedule, prompt, max_runs)``. ``max_runs`` is the
+    optional iteration cap (``--max N`` or ``--max=N``); ``None`` means run
+    forever. Uses ``shlex.split`` so a quoted cron expression
+    (``"*/10 * * * *"``) survives as one interval token.
 
-    Raises ``ValueError`` on missing/empty interval or prompt.
+    Raises ``ValueError`` on missing/empty interval or prompt, or an invalid
+    ``--max`` value.
     """
     args = args.strip()
     if not args:
@@ -89,8 +93,39 @@ def parse_loop_args(args: str) -> tuple[str, str]:
         interval = tokens[0]
         rest = tokens[1:]
 
-    prompt = " ".join(rest).strip()
+    # Pull an optional ``--max N`` / ``--max=N`` iteration cap out of the
+    # remaining tokens so it never becomes part of the prompt text.
+    max_runs: Optional[int] = None
+    cleaned: list[str] = []
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--max":
+            if i + 1 >= len(rest):
+                raise ValueError("--max 需要一个正整数  例: /loop 10m --max 5 <任务>")
+            max_runs = _parse_max_value(rest[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--max="):
+            max_runs = _parse_max_value(tok[len("--max="):])
+            i += 1
+            continue
+        cleaned.append(tok)
+        i += 1
+
+    prompt = " ".join(cleaned).strip()
     if not prompt:
         raise ValueError("请提供要循环执行的任务描述")
 
-    return normalize_loop_schedule(interval), prompt
+    return normalize_loop_schedule(interval), prompt, max_runs
+
+
+def _parse_max_value(raw: str) -> int:
+    """Coerce a ``--max`` token to a positive int or raise."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"--max 必须是正整数,收到 '{raw}'")
+    if value < 1:
+        raise ValueError("--max 必须是 >= 1 的整数")
+    return value

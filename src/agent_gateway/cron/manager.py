@@ -62,7 +62,12 @@ class CronManager:
         """Background loop: tick every 60 seconds."""
         while self._running:
             try:
-                await tick(self._store, verbose=True, runner=self._runner)
+                await tick(
+                    self._store,
+                    verbose=True,
+                    runner=self._runner,
+                    cron_manager=self,
+                )
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -104,3 +109,7 @@ class CronManager:
     def trigger_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Trigger a cron job to run on the next tick."""
         return jobs.trigger_job(job_id)
+
+    def list_job_outputs(self, job_id: str) -> List[Dict[str, Any]]:
+        """List a job's saved per-tick outputs (newest-first)."""
+        return jobs.list_job_outputs(job_id)

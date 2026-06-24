@@ -37,17 +37,18 @@ def test_normalize_bad_interval_raises():
 
 def test_parse_loop_bare_duration():
     # The key /loop behavior: bare 10m -> recurring every 10m.
-    assert parse_loop_args("10m check deploy") == ("every 10m", "check deploy")
+    assert parse_loop_args("10m check deploy") == ("every 10m", "check deploy", None)
 
 
 def test_parse_loop_every_form():
-    assert parse_loop_args("every 2h check status") == ("every 2h", "check status")
+    assert parse_loop_args("every 2h check status") == ("every 2h", "check status", None)
 
 
 def test_parse_loop_quoted_cron():
     assert parse_loop_args('"*/10 * * * *" check deploy') == (
         "*/10 * * * *",
         "check deploy",
+        None,
     )
 
 
@@ -64,6 +65,56 @@ def test_parse_loop_empty_raises():
 def test_parse_loop_bad_interval_raises():
     with pytest.raises(ValueError):
         parse_loop_args("10x check")
+
+
+# --max N iteration cap ------------------------------------------------------
+
+
+def test_parse_loop_max_space_form():
+    assert parse_loop_args("10m --max 5 check deploy") == (
+        "every 10m",
+        "check deploy",
+        5,
+    )
+
+
+def test_parse_loop_max_equals_form():
+    assert parse_loop_args("every 2h check status --max=20") == (
+        "every 2h",
+        "check status",
+        20,
+    )
+
+
+def test_parse_loop_max_leading_position():
+    # --max may appear before the prompt body.
+    assert parse_loop_args("10m --max 3 check status") == (
+        "every 10m",
+        "check status",
+        3,
+    )
+
+
+def test_parse_loop_max_not_in_prompt():
+    # The flag must be stripped, never folded into the prompt text.
+    schedule, prompt, _ = parse_loop_args("10m report --max 7 status")
+    assert "--max" not in prompt
+    assert prompt == "report status"
+
+
+def test_parse_loop_max_bad_value_raises():
+    with pytest.raises(ValueError):
+        parse_loop_args("10m --max soon check")
+
+
+def test_parse_loop_max_zero_raises():
+    with pytest.raises(ValueError):
+        parse_loop_args("10m --max 0 check")
+
+
+def test_parse_loop_max_missing_value_raises():
+    with pytest.raises(ValueError):
+        parse_loop_args("10m --max")
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +159,26 @@ async def test_loop_slash_exec_creates_recurring_local_job():
     assert job_kwargs["schedule"] == "every 10m"  # recurring, not one-shot
     assert job_kwargs["prompt"] == "check deploy"
     assert job_kwargs["deliver"] == "local"  # desktop default
+    assert job_kwargs["max_runs"] is None  # default: unlimited
     assert "output" in result
     assert "fakeid123456" in result["output"]
+
+
+async def test_loop_slash_exec_max_threads_into_create_job():
+    fake = _FakeCron()
+    methods._cron_manager = fake
+    try:
+        await methods.handle_slash_exec(
+            {"session_id": "s1", "command": "loop 10m --max 5 check deploy"},
+            emit=_noop_emit,
+            sessions=None,
+        )
+    finally:
+        methods._cron_manager = None
+
+    assert fake.created, "create_job was not called"
+    assert fake.created[0]["max_runs"] == 5
+    assert fake.created[0]["prompt"] == "check deploy"  # flag stripped
 
 
 async def test_loop_slash_exec_bad_interval_returns_warning():

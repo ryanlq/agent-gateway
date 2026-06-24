@@ -864,7 +864,7 @@ class GatewayRunner:
         from agent_gateway.core.commands import parse_loop_args
 
         try:
-            schedule, prompt = parse_loop_args(event.get_command_args())
+            schedule, prompt, max_runs = parse_loop_args(event.get_command_args())
         except ValueError as exc:
             return f"⚠️ {exc}"
 
@@ -880,17 +880,23 @@ class GatewayRunner:
 
         try:
             job = self.cron_manager.create_job(
-                prompt=prompt, schedule=schedule, deliver=deliver, origin=origin,
+                prompt=prompt,
+                schedule=schedule,
+                deliver=deliver,
+                origin=origin,
+                max_runs=max_runs,
             )
         except ValueError as exc:
             return f"❌ 创建失败: {exc}"
         except Exception as exc:
             return f"❌ 创建失败: {exc}"
 
+        cap = f"• 迭代上限: {max_runs} 次\n" if max_runs else ""
         return (
             f"🔁 已创建循环任务 \"{job.get('name', 'cron job')}\"\n"
             f"• ID: {job.get('id', '?')}\n"
             f"• 计划: {job.get('schedule_display', schedule)}\n"
+            f"{cap}"
             f"• 下次执行: {job.get('next_run_at', '?')}"
         )
 

@@ -79,6 +79,27 @@ def _job_output_dir(job_id: str) -> Path:
     return OUTPUT_DIR / text
 
 
+def list_job_outputs(job_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """List a job's saved outputs (one file per tick), newest-first.
+
+    Each ``*.md`` file under ``output/{job_id}/`` is a single run's output,
+    written by :func:`save_job_output`. Returns ``[{"run_at", "content"}]``.
+    The ``run_at`` is the filename stem (a ``YYYY-MM-DD_HH-MM-SS`` timestamp).
+    """
+    out_dir = _job_output_dir(job_id)
+    if not out_dir.is_dir():
+        return []
+    files = sorted(out_dir.glob("*.md"), key=lambda f: f.name, reverse=True)
+    outputs: List[Dict[str, Any]] = []
+    for path in files[:limit]:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        outputs.append({"run_at": path.stem, "content": content})
+    return outputs
+
+
 # =============================================================================
 # Field helpers
 # =============================================================================
@@ -128,6 +149,19 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     if not state:
         state = "scheduled" if normalized.get("enabled", True) else "paused"
     normalized["state"] = state
+
+    # Loop termination fields. max_runs is only meaningful for recurring jobs
+    # (one-shots run once regardless of any stored repeat.times).
+    repeat = normalized.get("repeat") if isinstance(normalized.get("repeat"), dict) else {}
+    normalized["completed"] = repeat.get("completed", 0)
+    schedule = normalized.get("schedule") if isinstance(normalized.get("schedule"), dict) else {}
+    if schedule.get("kind") in {"cron", "interval"}:
+        normalized["max_runs"] = repeat.get("times")  # None == unlimited
+    else:
+        normalized["max_runs"] = None
+    normalized["stop_condition"] = _coerce_job_text(
+        normalized.get("stop_condition")
+    ).strip() or None
 
     return normalized
 
@@ -441,6 +475,8 @@ def create_job(
     script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     no_agent: bool = False,
+    max_runs: Optional[int] = None,
+    stop_condition: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -454,6 +490,12 @@ def create_job(
         script: Optional pre-run script path.
         context_from: Optional job ID(s) whose output is injected as context.
         no_agent: When True, skip the agent — run script only.
+        max_runs: Optional iteration cap for RECURRING jobs (loops). When set,
+            the loop auto-terminates after this many successful runs. Ignored
+            for one-shots (they run once regardless). None = run forever.
+        stop_condition: Optional natural-language condition the loop agent
+            evaluates each iteration; when satisfied it self-terminates by
+            emitting a CRON_OPERATION pause_job. Only meaningful for loops.
 
     Returns:
         The created job dict.
@@ -463,6 +505,23 @@ def create_job(
     # Default delivery
     if deliver is None:
         deliver = "origin" if origin else "local"
+
+    # Loop iteration cap. One-shots always run once; recurring jobs run forever
+    # unless an explicit max_runs termination condition is set.
+    if max_runs is not None:
+        if not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs < 1:
+            raise ValueError("max_runs 必须是 >= 1 的整数")
+    if parsed_schedule["kind"] == "once":
+        repeat_times: Optional[int] = 1
+    elif max_runs is not None:
+        repeat_times = max_runs
+    else:
+        repeat_times = None
+
+    normalized_stop_condition = (
+        str(stop_condition).strip() if isinstance(stop_condition, str) else None
+    )
+    normalized_stop_condition = normalized_stop_condition or None
 
     job_id = uuid.uuid4().hex[:12]
     now = _now().isoformat()
@@ -497,9 +556,10 @@ def create_job(
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
-            "times": 1 if parsed_schedule["kind"] == "once" else None,
+            "times": repeat_times,
             "completed": 0,
         },
+        "stop_condition": normalized_stop_condition,
         "enabled": True,
         "state": "scheduled",
         "paused_at": None,
@@ -657,7 +717,18 @@ def mark_job_run(
                     times = job["repeat"].get("times")
                     completed = job["repeat"]["completed"]
                     if times is not None and times > 0 and completed >= times:
-                        # Limit reached — remove job
+                        kind = job.get("schedule", {}).get("kind")
+                        if kind in {"cron", "interval"}:
+                            # Loop reached its iteration cap — mark it complete
+                            # and keep it visible so the user can still review
+                            # its outputs in the Loops panel. (One-shots are
+                            # removed below, preserving existing behavior.)
+                            job["enabled"] = False
+                            job["state"] = "completed"
+                            job["next_run_at"] = None
+                            save_jobs(jobs)
+                            return
+                        # One-shot finished — remove it.
                         jobs.pop(i)
                         save_jobs(jobs)
                         return
