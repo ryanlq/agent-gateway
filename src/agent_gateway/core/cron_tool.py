@@ -12,6 +12,7 @@ Supported actions:
     - ``delete_job``   — delete a cron job
     - ``pause_job``    — pause a cron job
     - ``resume_job``   — resume a paused cron job
+    - ``schedule_next`` — re-arm a continuous loop for its next iteration (agent-paced)
     - ``list_jobs``    — list all cron jobs (returned as formatted text)
 """
 
@@ -208,13 +209,14 @@ class CronToolExecutor:
             "delete_job": self._delete_job,
             "pause_job": self._pause_job,
             "resume_job": self._resume_job,
+            "schedule_next": self._schedule_next,
             "list_jobs": self._list_jobs,
         }.get(op.action)
 
         if not handler:
             return CronOperationResult(
                 success=False,
-                message=f"未知操作: '{op.action}'。支持: create_job, create_script, delete_job, pause_job, resume_job, list_jobs",
+                message=f"未知操作: '{op.action}'。支持: create_job, create_script, delete_job, pause_job, resume_job, schedule_next, list_jobs",
             )
 
         return await handler(op.params, origin=origin)
@@ -416,6 +418,90 @@ class CronToolExecutor:
             )
         return CronOperationResult(
             success=False, message=f"恢复失败: 未找到任务 {job_id}"
+        )
+
+    async def _schedule_next(
+        self, params: Dict[str, Any], *, origin: Optional[Dict[str, Any]] = None
+    ) -> CronOperationResult:
+        """Re-arm a continuous loop for its next iteration.
+
+        This is the agent-paced complement to ``pause_job``: instead of the
+        gateway imposing a fixed cadence, the running iteration decides when (or
+        whether) the next one should fire. ``delay`` is optional — omit it (or
+        pass ``0``/``"now"``) to run again immediately, or give a duration
+        (``"10m"``/``"2h"``) to wait. To end the loop, the agent emits
+        ``pause_job`` instead.
+
+        Only meaningful for ``continuous`` loops; fixed-interval/cron jobs ignore
+        their cadence if this is used, so we refuse it there.
+        """
+        from datetime import timedelta
+
+        from agent_gateway.cron.jobs import (
+            _now,
+            get_job,
+            parse_duration,
+        )
+
+        job_id = str(params.get("job_id", "")).strip()
+        if not job_id:
+            return CronOperationResult(
+                success=False, message="安排下一轮失败: 需要提供 'job_id'"
+            )
+
+        existing = get_job(job_id)
+        if not existing:
+            return CronOperationResult(
+                success=False, message=f"安排下一轮失败: 未找到任务 {job_id}"
+            )
+        schedule = existing.get("schedule") or {}
+        if schedule.get("kind") != "continuous":
+            return CronOperationResult(
+                success=False,
+                message=(
+                    "安排下一轮失败: 该任务不是 agent 节奏的循环"
+                    f"(类型={schedule.get('kind', '?')})。"
+                    "schedule_next 仅适用于 agent-paced 循环。"
+                ),
+            )
+
+        # Resolve delay → absolute run time. None/"now"/0/"" → immediately.
+        raw_delay = params.get("delay")
+        if raw_delay in (None, "", 0, "0", "now"):
+            when = _now().isoformat()
+        elif isinstance(raw_delay, (int, float)) and raw_delay > 0:
+            when = (_now() + timedelta(seconds=float(raw_delay))).isoformat()
+        else:
+            try:
+                # parse_duration returns minutes
+                when = (
+                    _now() + timedelta(minutes=parse_duration(str(raw_delay)))
+                ).isoformat()
+            except ValueError as e:
+                return CronOperationResult(
+                    success=False,
+                    message=(
+                        f"安排下一轮失败: 无效的 delay '{raw_delay}' ({e})。"
+                        "示例: 0 / 'now' / '10m' / '2h'"
+                    ),
+                )
+
+        job = self._mgr.set_next_run(job_id, when)
+        if not job:
+            return CronOperationResult(
+                success=False,
+                message=(
+                    f"安排下一轮失败: 任务 {job_id} 未启用(已暂停/已完成),"
+                    "无法自动开启。"
+                ),
+            )
+        return CronOperationResult(
+            success=True,
+            message=(
+                f"已安排循环 \"{job.get('name', job_id)}\" 的下一轮\n"
+                f"• 下次执行: {job.get('next_run_at', when)}"
+            ),
+            data={"job_id": job_id, "next_run_at": when},
         )
 
     async def _list_jobs(

@@ -24,6 +24,31 @@ _DURATION_RE = re.compile(r"^\d+[smhd]$", re.IGNORECASE)
 _CRON_FIELD_RE = re.compile(r"^[\d\*\-,/]+$")
 
 
+def _is_interval_token(tok: str) -> bool:
+    """Whether ``tok`` is a valid fixed-cadence interval (a bare duration or a
+    multi-field cron expression). Used to decide whether ``/loop X ...`` treats
+    ``X`` as the interval or as the start of the prompt."""
+    low = tok.strip().lower()
+    if not low:
+        return False
+    if _DURATION_RE.match(low):
+        return True
+    parts = tok.split()
+    return len(parts) >= 5 and all(_CRON_FIELD_RE.match(p) for p in parts[:5])
+
+
+# "Looks like the user was TRYING to write an interval" — digits followed by a
+# letter, e.g. "10m", "2h", but also typos like "10x" or "5z". We treat these as
+# interval attempts (validate them → raise on a bad unit) rather than swallowing
+# them into the prompt. Plain words ("daily", "检查", "check") don't match, so
+# ``/loop <task>`` with no interval correctly defaults to agent-paced.
+_INTERVAL_ATTEMPT_RE = re.compile(r"^\d+[a-zA-Z]+$")
+
+
+def _looks_like_interval_attempt(tok: str) -> bool:
+    return bool(_INTERVAL_ATTEMPT_RE.match(tok.strip()))
+
+
 def normalize_loop_schedule(interval: str) -> str:
     """Force a ``/loop`` interval to be RECURRING.
 
@@ -35,15 +60,20 @@ def normalize_loop_schedule(interval: str) -> str:
     - ``10m``           -> ``every 10m``   (bare duration -> recurring)
     - ``every 2h``      -> ``every 2h``    (already recurring)
     - ``*/10 * * * *``  -> as-is           (cron expr, already recurring)
+    - ``continuous`` / ``agent`` / ``ondemand`` -> agent-paced loop (no timer)
 
     Raises ``ValueError`` if the interval is neither a duration, an ``every``
-    form, nor a cron expression (natural-language intervals are left to the
-    agent-parse fallback in the caller).
+    form, a cron expression, nor an agent-paced keyword (natural-language
+    intervals are left to the agent-parse fallback in the caller).
     """
     s = interval.strip()
     if not s:
         raise ValueError("缺少循环间隔")
     low = s.lower()
+
+    # Agent-paced loop: the agent decides when (or whether) to run again.
+    if low in {"continuous", "agent", "ondemand", "agent-paced"}:
+        return "continuous"
 
     if low.startswith("every "):
         return s
@@ -89,9 +119,25 @@ def parse_loop_args(args: str) -> tuple[str, str, Optional[int]]:
     if tokens[0].lower() == "every" and len(tokens) >= 2:
         interval = f"{tokens[0]} {tokens[1]}"
         rest = tokens[2:]
-    else:
+    elif tokens[0].lower() in {"continuous", "agent", "ondemand", "agent-paced"}:
+        # Explicit agent-paced keyword.
+        interval = "continuous"
+        rest = tokens[1:]
+    elif _is_interval_token(tokens[0]):
+        # A bare duration (10m) or cron expr as the first token → fixed cadence.
         interval = tokens[0]
         rest = tokens[1:]
+    elif _looks_like_interval_attempt(tokens[0]):
+        # e.g. "10x" / "5z" — the user was trying to set an interval but the unit
+        # is invalid. Validate it so normalize_loop_schedule raises a clear error
+        # rather than silently burying it in the prompt as agent-paced.
+        interval = tokens[0]
+        rest = tokens[1:]
+    else:
+        # No interval given (/loop <task>) → default to agent-paced: the agent
+        # controls its own pace via schedule_next. Keeps the prompt intact.
+        interval = "continuous"
+        rest = tokens
 
     # Pull an optional ``--max N`` / ``--max=N`` iteration cap out of the
     # remaining tokens so it never becomes part of the prompt text.

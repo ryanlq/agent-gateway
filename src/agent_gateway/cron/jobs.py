@@ -148,14 +148,24 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     state = _coerce_job_text(normalized.get("state")).strip()
     if not state:
         state = "scheduled" if normalized.get("enabled", True) else "paused"
+    # Continuous loops idle between iterations: an enabled loop with no pending
+    # next_run_at (waiting for the agent to schedule the next iteration) reads
+    # as "idle" rather than the misleading "scheduled".
+    schedule = normalized.get("schedule") if isinstance(normalized.get("schedule"), dict) else {}
+    if (
+        schedule.get("kind") == "continuous"
+        and state in {"scheduled", ""}
+        and normalized.get("enabled", True)
+        and not normalized.get("next_run_at")
+    ):
+        state = "idle"
     normalized["state"] = state
 
     # Loop termination fields. max_runs is only meaningful for recurring jobs
     # (one-shots run once regardless of any stored repeat.times).
     repeat = normalized.get("repeat") if isinstance(normalized.get("repeat"), dict) else {}
     normalized["completed"] = repeat.get("completed", 0)
-    schedule = normalized.get("schedule") if isinstance(normalized.get("schedule"), dict) else {}
-    if schedule.get("kind") in {"cron", "interval"}:
+    if schedule.get("kind") in {"cron", "interval", "continuous"}:
         normalized["max_runs"] = repeat.get("times")  # None == unlimited
     else:
         normalized["max_runs"] = None
@@ -241,6 +251,13 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     schedule = schedule.strip()
     original = schedule
     schedule_lower = schedule.lower()
+
+    # "continuous" / "agent" / "ondemand" → agent-paced loop. The gateway runs
+    # the first iteration immediately, then each iteration decides for itself
+    # when (or whether) to run the next one via a schedule_next operation. No
+    # wall-clock cadence is imposed — the only ceiling is the user's max_runs.
+    if schedule_lower in {"continuous", "agent", "ondemand", "agent-paced"}:
+        return {"kind": "continuous", "display": "agent-paced"}
 
     # "every X" pattern → recurring interval
     if schedule_lower.startswith("every "):
@@ -381,6 +398,14 @@ def compute_next_run(
         else:
             next_run = now + timedelta(minutes=minutes)
         return next_run.isoformat()
+
+    elif schedule["kind"] == "continuous":
+        # Agent-paced: run immediately when first scheduled / resumed /
+        # manually triggered (no last_run_at), then go idle after each run.
+        # The agent itself re-arms the next run via a schedule_next operation.
+        if last_run_at is None:
+            return now.isoformat()
+        return None
 
     elif schedule["kind"] == "cron":
         if not HAS_CRONITER:
@@ -675,6 +700,63 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     )
 
 
+def clear_next_run(job_id: str) -> None:
+    """Clear a continuous loop's pending run BEFORE it executes.
+
+    The due job's ``next_run_at`` is the run about to happen. For a continuous
+    loop we must forget it now so that, if the running iteration emits NO
+    ``schedule_next`` block, the loop lands idle rather than re-firing the same
+    stale timestamp forever. If the agent DOES emit ``schedule_next`` (via
+    ``set_next_run`` during execution) the loop is correctly re-armed. A no-op
+    for non-continuous jobs.
+    """
+    with _jobs_file_lock:
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+            kind = job.get("schedule", {}).get("kind")
+            if kind != "continuous":
+                return
+            if job.get("next_run_at"):
+                job["next_run_at"] = None
+                save_jobs(jobs)
+            return
+
+
+def set_next_run(job_id: str, when: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Arm (or clear) a job's next run time.
+
+    Used by the agent ``schedule_next`` protocol to re-arm a continuous loop for
+    its next iteration. Pass an ISO timestamp to schedule, or ``None`` to idle
+    the job (agent declined to schedule another run). Unlike ``trigger_job``
+    this does not force the state to "scheduled" — it leaves paused/completed
+    jobs alone so the agent can't yank a paused loop back to life on its own.
+    """
+    jobs = load_jobs()
+    with _jobs_file_lock:
+        for i, job in enumerate(jobs):
+            if job["id"] != job_id:
+                continue
+            if not job.get("enabled", True):
+                # Don't resurrect paused/completed/error loops from within an
+                # agent run — that would bypass the user's manual pause.
+                logger.info(
+                    "set_next_run: job '%s' not enabled (state=%s); ignoring.",
+                    job_id, job.get("state"),
+                )
+                return _normalize_job_record(job)
+            job["next_run_at"] = when
+            # Only flip idle→scheduled; never downgrade an active terminal state.
+            if when and job.get("state") in {"idle", "", None}:
+                job["state"] = "scheduled"
+            elif not when and job.get("state") == "scheduled":
+                job["state"] = "idle"
+            save_jobs(jobs)
+            return _normalize_job_record(job)
+    return None
+
+
 def remove_job(job_id: str) -> bool:
     """Remove a job by ID."""
     jobs = load_jobs()
@@ -718,7 +800,7 @@ def mark_job_run(
                     completed = job["repeat"]["completed"]
                     if times is not None and times > 0 and completed >= times:
                         kind = job.get("schedule", {}).get("kind")
-                        if kind in {"cron", "interval"}:
+                        if kind in {"cron", "interval", "continuous"}:
                             # Loop reached its iteration cap — mark it complete
                             # and keep it visible so the user can still review
                             # its outputs in the Loops panel. (One-shots are
@@ -733,29 +815,38 @@ def mark_job_run(
                         save_jobs(jobs)
                         return
 
-                # Compute next run
-                job["next_run_at"] = compute_next_run(job["schedule"], now)
+                # Compute next run.
+                kind = job.get("schedule", {}).get("kind")
+                if kind == "continuous":
+                    # Agent-paced: the agent may have pre-armed the next run via
+                    # a schedule_next operation during execution — preserve it.
+                    # If it didn't, go idle (next_run_at=None, state="idle").
+                    if not job.get("next_run_at"):
+                        job["next_run_at"] = None
+                    if job.get("state") != "paused":
+                        job["state"] = "scheduled" if job.get("next_run_at") else "idle"
+                else:
+                    job["next_run_at"] = compute_next_run(job["schedule"], now)
 
-                if job["next_run_at"] is None:
-                    kind = job.get("schedule", {}).get("kind")
-                    if kind in {"cron", "interval"}:
-                        job["state"] = "error"
-                        if not job.get("last_error"):
-                            job["last_error"] = (
-                                "Failed to compute next run for recurring "
-                                "schedule (is the 'croniter' package "
-                                "installed?)"
+                    if job["next_run_at"] is None:
+                        if kind in {"cron", "interval"}:
+                            job["state"] = "error"
+                            if not job.get("last_error"):
+                                job["last_error"] = (
+                                    "Failed to compute next run for recurring "
+                                    "schedule (is the 'croniter' package "
+                                    "installed?)"
+                                )
+                            logger.error(
+                                "Job '%s' (%s) could not compute next_run_at",
+                                job.get("name", job["id"]),
+                                kind,
                             )
-                        logger.error(
-                            "Job '%s' (%s) could not compute next_run_at",
-                            job.get("name", job["id"]),
-                            kind,
-                        )
-                    else:
-                        job["enabled"] = False
-                        job["state"] = "completed"
-                elif job.get("state") != "paused":
-                    job["state"] = "scheduled"
+                        else:
+                            job["enabled"] = False
+                            job["state"] = "completed"
+                    elif job.get("state") != "paused":
+                        job["state"] = "scheduled"
 
                 save_jobs(jobs)
                 return

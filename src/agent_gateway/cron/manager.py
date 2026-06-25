@@ -110,6 +110,10 @@ class CronManager:
         """Trigger a cron job to run on the next tick."""
         return jobs.trigger_job(job_id)
 
+    def set_next_run(self, job_id: str, when: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Arm (or clear) a job's next run — used by the agent schedule_next protocol."""
+        return jobs.set_next_run(job_id, when)
+
     def list_job_outputs(self, job_id: str) -> List[Dict[str, Any]]:
         """List a job's saved per-tick outputs (newest-first)."""
         return jobs.list_job_outputs(job_id)

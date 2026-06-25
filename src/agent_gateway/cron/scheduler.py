@@ -33,6 +33,7 @@ from agent_gateway.cron.jobs import (
     JOBS_FILE,
     OUTPUT_DIR,
     advance_next_run,
+    clear_next_run,
     get_due_jobs,
     mark_job_run,
     save_job_output,
@@ -266,15 +267,19 @@ def _build_job_prompt(job: dict) -> Optional[str]:
 
 def _build_loop_system_extra(job: dict) -> str:
     """System-prompt guidance that makes a recurring loop self-aware and able
-    to terminate itself.
+    to control its own continuation.
 
     Injected via ``bridge.chat(system_extra=...)`` (the agent's
     ``--append-system-prompt`` flag). Without this a loop agent has no idea it
     is iterating, does not know its own job_id, and cannot stop — so a loop
     runs forever until a human intervenes. Returns "" for one-shots.
+
+    For agent-paced (``continuous``) loops the agent also controls WHEN the next
+    iteration runs via a ``schedule_next`` block — it is not on a fixed timer.
     """
     schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
-    if schedule.get("kind") not in {"cron", "interval"}:
+    kind = schedule.get("kind")
+    if kind not in {"cron", "interval", "continuous"}:
         return ""  # one-shots don't loop
 
     job_id = job.get("id", "")
@@ -283,11 +288,25 @@ def _build_loop_system_extra(job: dict) -> str:
     times = repeat.get("times")
     iteration = completed + 1  # the run about to happen
 
+    if kind == "continuous":
+        pace_intro = (
+            "This is an AGENT-PACED loop — there is no fixed timer. After you "
+            "finish, the loop goes idle and will NOT run again unless YOU "
+            "explicitly schedule the next iteration (below). You decide the "
+            "pace: run again immediately, after a delay, or end it. If you do "
+            "neither, the loop simply waits."
+        )
+    else:
+        pace_intro = (
+            "This loop runs on a fixed schedule, so the next iteration is "
+            "already automatic. Do not schedule the next run yourself — focus "
+            "on this iteration's task."
+        )
+
     head = (
-        "You are running as ONE ITERATION of a recurring loop (a scheduled "
-        "cron job that fires repeatedly). Each iteration is independent — you "
-        "have no memory of prior runs. This is iteration "
-        f"{iteration}" + (f" of {times}." if times else ".")
+        "You are running as ONE ITERATION of a recurring loop. Each iteration "
+        "is independent — you have no memory of prior runs. This is iteration "
+        f"{iteration}" + (f" of {times}." if times else ".") + f"\n\n{pace_intro}"
     )
 
     stop_condition = str(job.get("stop_condition") or "").strip()
@@ -307,7 +326,7 @@ def _build_loop_system_extra(job: dict) -> str:
         )
 
     terminate_block = (
-        "To terminate this loop, output this exact block — the gateway parses "
+        "To TERMINATE this loop, output this exact block — the gateway parses "
         "and executes it, then stops scheduling further runs:\n"
         "```\n"
         "<!--CRON_OPERATION\n"
@@ -319,11 +338,37 @@ def _build_loop_system_extra(job: dict) -> str:
         "```\n"
         "-->\n"
         "```\n"
-        "Only emit it when the loop should genuinely stop; otherwise just do "
-        "the task and produce your normal report."
+        "Only emit it when the loop should genuinely stop."
     )
 
-    return "\n\n".join([head, stop_clause, terminate_block])
+    parts = [head, stop_clause, terminate_block]
+
+    # Agent-paced loops get an additional block to re-arm the next iteration.
+    if kind == "continuous":
+        next_block = (
+            "To SCHEDULE THE NEXT ITERATION, output this exact block (the "
+            "gateway parses and executes it, then runs the loop again):\n"
+            "```\n"
+            "<!--CRON_OPERATION\n"
+            "```json\n"
+            "{\n"
+            '  "action": "schedule_next",\n'
+            f'  "params": {{"job_id": "{job_id}", "delay": "10m"}}\n'
+            "}\n"
+            "```\n"
+            "-->\n"
+            "```\n"
+            "Use \"delay\" to control the pace: \"now\" or 0 = run again "
+            "immediately (push as fast as possible until done); a duration like "
+            "\"10m\"/\"2h\"/\"30s\" = wait that long first. Choose the delay "
+            "based on how long you should wait before this task is worth doing "
+            "again — e.g. for a deploy check, a few minutes; for a daily "
+            "report, hours. If you emit no schedule_next and no pause_job, the "
+            "loop stays idle and will not continue on its own."
+        )
+        parts.append(next_block)
+
+    return "\n\n".join(parts)
 
 
 
@@ -463,18 +508,34 @@ async def run_job(
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
 
+    # Continuous loops: forget the run that's about to fire. If this iteration
+    # emits no schedule_next, the loop should land idle — not re-fire the same
+    # stale timestamp. A schedule_next block (executed below) re-arms it.
+    clear_next_run(job_id)
+
     try:
-        cron_timeout = _DEFAULT_CRON_TIMEOUT
-        env_timeout = os.getenv("NEXUS_AGENT_CRON_TIMEOUT", "").strip()
-        if env_timeout:
-            try:
-                cron_timeout = float(env_timeout)
-            except (ValueError, TypeError):
-                pass
+        # Per-iteration deadline. Recurring loops (interval/cron/continuous) run
+        # with NO forced deadline: the agent's own max_turns/timeout (set by the
+        # user in agent settings) governs each iteration, and the loop's max_runs
+        # is the only hard ceiling. Imposing a wall-clock cut here would kill
+        # long-but-legitimate iterations — we no longer guess how long a task
+        # needs. One-shot cron jobs keep the env-overridable default timeout as a
+        # backstop, since they are meant to be short reports/watchdogs.
+        schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+        if schedule.get("kind") in {"interval", "cron", "continuous"}:
+            cron_timeout = None  # unlimited — agent runs to its own limit
+        else:
+            cron_timeout = _DEFAULT_CRON_TIMEOUT
+            env_timeout = os.getenv("NEXUS_AGENT_CRON_TIMEOUT", "").strip()
+            if env_timeout:
+                try:
+                    cron_timeout = float(env_timeout)
+                except (ValueError, TypeError):
+                    pass
 
         final_response = await asyncio.wait_for(
             _execute_agent(store, job, prompt, system_extra=_build_loop_system_extra(job)),
-            timeout=cron_timeout if cron_timeout > 0 else None,
+            timeout=cron_timeout if cron_timeout and cron_timeout > 0 else None,
         )
 
         if final_response.strip() == "(No response generated)":
@@ -520,7 +581,8 @@ async def run_job(
         return True, output, final_response, None
 
     except asyncio.TimeoutError:
-        error_msg = f"Cron job '{job_name}' timed out after {int(cron_timeout)}s"
+        secs = int(cron_timeout) if cron_timeout else _DEFAULT_CRON_TIMEOUT
+        error_msg = f"Cron job '{job_name}' timed out after {secs}s"
         logger.error(error_msg)
         output = (
             f"# Cron Job: {job_name} (TIMEOUT)\n\n"
