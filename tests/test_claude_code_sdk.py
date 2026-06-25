@@ -75,6 +75,32 @@ class TestConstruction:
         opts = b._build_options(None, "")
         assert opts.extra_args.get("effort") == "high"
 
+    def test_options_omits_max_turns_when_unlimited(self):
+        """max_turns=None (client 'Unlimited') must NOT be forwarded to the
+        SDK — it's omitted so the agent runs to natural completion."""
+        captured = {}
+
+        class FakeOpts:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        b = ClaudeCodeSdkBridge(max_turns=None)
+        with patch("claude_code_sdk.ClaudeCodeOptions", FakeOpts):
+            b._build_options(None, "")
+        assert "max_turns" not in captured
+
+    def test_options_includes_max_turns_when_set(self):
+        captured = {}
+
+        class FakeOpts:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        b = ClaudeCodeSdkBridge(max_turns=7)
+        with patch("claude_code_sdk.ClaudeCodeOptions", FakeOpts):
+            b._build_options(None, "")
+        assert captured["max_turns"] == 7
+
 
 # ---------------------------------------------------------------------------
 # Prompt building

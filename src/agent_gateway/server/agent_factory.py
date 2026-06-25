@@ -42,16 +42,18 @@ def _coerce_params(cls: type, kwargs: dict) -> dict:
         val = coerced[key]
         if ann_name == "bool" and isinstance(val, str):
             coerced[key] = val.lower() in ("true", "1", "yes")
-        elif ann_name == "int" and isinstance(val, str):
-            try:
-                coerced[key] = int(val)
-            except ValueError:
-                pass
-        elif ann_name == "float" and isinstance(val, str):
-            try:
-                coerced[key] = float(val)
-            except ValueError:
-                pass
+        elif ann_name in ("int", "float") and isinstance(val, str):
+            # Empty string / explicit sentinels mean "unlimited" (e.g. a
+            # client-side "Unlimited" toggle) → None. The bridges treat
+            # timeout=None as no deadline (asyncio.wait_for) and max_turns=None
+            # as "let the SDK run to natural completion".
+            if val.strip().lower() in ("", "none", "unlimited"):
+                coerced[key] = None
+            else:
+                try:
+                    coerced[key] = int(val) if ann_name == "int" else float(val)
+                except ValueError:
+                    pass
     return coerced
 
 

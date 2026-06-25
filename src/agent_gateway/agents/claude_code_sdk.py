@@ -115,10 +115,13 @@ class ClaudeCodeSdkBridge(CLIAgentBridge):
         from claude_code_sdk import ClaudeCodeOptions
 
         kwargs: dict[str, Any] = {
-            "max_turns": self.max_turns,
             "permission_mode": self.permission_mode,
             "continue_conversation": bool(session_ref),
         }
+        # max_turns=None (client "Unlimited") → omit it so the SDK runs until
+        # the agent naturally stops, instead of forwarding None.
+        if self.max_turns is not None:
+            kwargs["max_turns"] = self.max_turns
         if self.model:
             kwargs["model"] = self.model
         if session_ref:

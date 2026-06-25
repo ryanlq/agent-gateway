@@ -175,7 +175,13 @@ def make_agent_callback(*, agent_timeout: float = 1800.0) -> Any:
         from agent_gateway.server.agent_factory import create_bridge
 
         agent_type = _store.get_config("default_agent", "claude-code-sdk")
-        bridge = create_bridge(agent_type, timeout=agent_timeout)
+        # Forward per-agent params (model, max_turns, timeout, …) so client
+        # settings actually take effect on this path. Per-agent timeout
+        # (client "Unlimited" → "") overrides the global agent_timeout.
+        all_params: dict = _store.get_config("agent_params") or {}
+        agent_params = all_params.get(agent_type, {}) if isinstance(all_params, dict) else {}
+        agent_params.setdefault("timeout", agent_timeout)
+        bridge = create_bridge(agent_type, **agent_params)
         try:
             chunks: list[str] = []
             async for chunk in bridge.stream(

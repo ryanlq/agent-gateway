@@ -683,7 +683,12 @@ class GatewayRunner:
             agent_type = "claude-code"
             agent_params = {}
 
-        bridge = create_bridge(agent_type, timeout=self.config.agent_timeout, **agent_params)
+        # Per-agent timeout (client "Unlimited" → "") overrides the global
+        # agent_timeout; fall back to the global when unset. Folded into
+        # agent_params rather than passed as an explicit kwarg so a user-set
+        # timeout doesn't collide (duplicate-keyword TypeError).
+        agent_params.setdefault("timeout", self.config.agent_timeout)
+        bridge = create_bridge(agent_type, **agent_params)
         # Set default cwd from hermes_config.terminal.cwd if available
         if self._desktop_store and not bridge.config.cwd:
             hermes_cfg = self._desktop_store.get_config("hermes_config", {})
