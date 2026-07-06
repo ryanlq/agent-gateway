@@ -1,27 +1,26 @@
 """
-Feishu tool-call summary card — streaming card builder + throttled patcher.
+Feishu task-status card — streaming card builder + throttled patcher.
 
-Renders a single agent round's ``tool_use`` calls as one Feishu interactive
-card that grows in place:
+Renders a single agent round as one Feishu interactive card that reflects the
+overall task state instead of per-tool detail:
 
-    ┌─ 💬 处理中 ──────────────────┐
-    │  🔄 Read   src/app.tsx  · …   │
-    │  ✓ Edit    src/app.tsx  · 0.1s│
-    │  ✗ Bash    pytest     · 5.2s  │
-    │  ─────────────────────────── │
-    │  🤖 Claude Code · 3 tools · 5.6s │
-    └───────────────────────────────┘
+    ┌─ 💬 任务执行中 ────────────┐
+    │  正在处理您的请求...          │
+    └─────────────────────────────┘
 
-The card is updated via ``PATCH /im/v1/messages/:id`` (``msg_type=interactive``).
-Feishu caps a message at 20 edits, so :class:`ThrottledCardPatcher` coalesces
-updates and soft-stops before the cap. Card body is hard-capped at 30 KB, so
-only one-line status rows are emitted — input/output stay out of the card.
+Two state transitions, exactly two PATCH calls per round:
+
+  1. ``begin_tool_round``  →  create card with state ``running``
+  2. ``end_tool_round``    →  patch card to ``done`` / ``failed`` / ``interrupted``
+
+The card body is hard-capped at 30 KB and a single message at 20 edits; the
+:class:`ThrottledCardPatcher` keeps the existing safeguards for that.  Feishu
+has no native auto-ticking client-side element, so no time / count is shown —
+the state label is the only signal.
 
 Schema is classic Feishu card v1 (``config`` + ``header.template`` + top-level
 ``elements``): the most broadly supported form for ``interactive`` messages
-and PATCH streaming. :class:`ToolCardBuilder` isolates all card-JSON
-construction, so swapping individual elements (e.g. to ``expandable_note``
-later) is a single-method change.
+and PATCH streaming.
 """
 
 from __future__ import annotations
@@ -30,223 +29,76 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
-# Feishu caps a single message at 20 edits. We stop auto-patching a few short
-# of that so the final ``finalize()`` always has headroom for one last patch.
+# Feishu caps a single message at 20 edits. ``finalize()`` bypasses the soft
+# cap below to always land one last patch.
 EDIT_SOFT_CAP = 17
-
-# Coalesce policy: flush after this many buffered tool changes, or this many
-# seconds since the last patch — whichever comes first. A failure always
-# flushes immediately.
-FLUSH_AFTER_CHANGES = 3
-FLUSH_AFTER_SECONDS = 1.5
 
 # Safety margin under Feishu's 30 KB card-body cap. A final card that would
 # exceed this is dropped (the card stays at its last good mid-stream state)
 # rather than erroring on every patch.
 CARD_BODY_MAX = 28_000
 
-# Cap a tool's one-line argument summary so a long command/path can't blow up
-# a row (and the 30 KB card budget).
-ARG_SUMMARY_MAX = 48
-ERROR_NOTE_MAX = 1000
-
 _RUNNING = "running"
 _DONE = "done"
 _FAILED = "failed"
+_INTERRUPTED = "interrupted"
+
+# Outcome → (header title, header template color, body status text)
+_OUTCOME_DISPLAY: dict[str, tuple[str, str, str]] = {
+    _RUNNING: ("💬 任务执行中", "blue", "正在处理您的请求..."),
+    _DONE: ("✓ 任务完成", "green", "已完成您的请求"),
+    _FAILED: ("⚠ 任务失败", "red", "部分处理失败"),
+    _INTERRUPTED: ("⏸ 任务中断", "orange", "处理已被中断"),
+}
 
 
-@dataclass
-class ToolEntry:
-    """One tool invocation within a round."""
+class TaskStatusCard:
+    """Holds the canonical task-state and renders the Feishu card dict.
 
-    tool_id: str
-    name: str
-    arg: str = ""
-    status: str = _RUNNING
-    elapsed: Optional[float] = None
-    error: str = ""
-
-
-def summarize_arg(name: str, tool_input: Optional[dict[str, Any]]) -> str:
-    """Pick the most relevant single-line argument for a tool.
-
-    Read/Edit/Write → file_path, Bash → command, Grep/Glob → pattern, etc.
-    Everything else falls back to the first string-valued argument.
-    """
-    if not tool_input:
-        return ""
-    key = {
-        "Read": "file_path",
-        "Edit": "file_path",
-        "Write": "file_path",
-        "MultiEdit": "file_path",
-        "NotebookEdit": "notebook_path",
-    }.get(name)
-    if key:
-        val = tool_input.get(key)
-        if isinstance(val, str):
-            return _clip(val)
-    if name == "Bash":
-        return _clip(str(tool_input.get("command", "")))
-    if name in ("Grep", "Glob"):
-        return _clip(str(tool_input.get("pattern", "")))
-    if name in ("WebFetch", "WebSearch"):
-        return _clip(str(tool_input.get("url") or tool_input.get("query") or ""))
-    if name in ("Agent", "Task"):
-        return _clip(str(tool_input.get("description") or tool_input.get("prompt") or ""))
-    # Generic fallback: first string value.
-    for val in tool_input.values():
-        if isinstance(val, str) and val:
-            return _clip(val)
-    return ""
-
-
-def _clip(text: str) -> str:
-    text = text.strip().replace("\n", " ")
-    if len(text) > ARG_SUMMARY_MAX:
-        return text[: ARG_SUMMARY_MAX - 1] + "…"
-    return text
-
-
-class ToolCardBuilder:
-    """Holds the canonical card state and renders the Feishu card dict.
-
-    The builder is the single source of truth; the patcher decides *when* to
-    push ``render()`` to the API. Mutations are cheap (in-memory); the
+    The card is the single source of truth; the patcher decides *when* to
+    push ``render()`` to the API.  Mutations are cheap (in-memory); the
     expensive PATCH only fires on the patcher's schedule.
     """
 
-    def __init__(self, agent_label: str = "Claude Code") -> None:
-        self._agent_label = agent_label
-        self._tools: dict[str, ToolEntry] = {}
-        self._order: list[str] = []
-        self._outcome: str = "running"  # running | done | failed | interrupted
-        self._total_elapsed: Optional[float] = None
+    def __init__(self) -> None:
+        self._outcome: str = _RUNNING
 
-    # -- mutation -------------------------------------------------------
+    def finalize(self, outcome: str) -> None:
+        """Transition the card to its terminal state.
 
-    def add_start(self, tool_id: str, name: str, tool_input: Optional[dict[str, Any]]) -> None:
-        if tool_id in self._tools:
-            return
-        self._tools[tool_id] = ToolEntry(
-            tool_id=tool_id, name=name, arg=summarize_arg(name, tool_input)
-        )
-        self._order.append(tool_id)
-
-    def add_complete(
-        self,
-        tool_id: str,
-        *,
-        elapsed: Optional[float],
-        is_error: bool,
-        error: str = "",
-    ) -> None:
-        entry = self._tools.get(tool_id)
-        if entry is None:
-            # Complete without a seen start — record it as a finished tool.
-            entry = ToolEntry(tool_id=tool_id, name="tool")
-            self._tools[tool_id] = entry
-            self._order.append(tool_id)
-        entry.elapsed = elapsed
-        if is_error:
-            entry.status = _FAILED
-            entry.error = (error or "failed")[:ERROR_NOTE_MAX]
+        ``outcome`` is one of ``"done"`` / ``"failed"`` / ``"interrupted"``;
+        any other value is coerced to ``"done"``.
+        """
+        if outcome in (_DONE, _FAILED, _INTERRUPTED):
+            self._outcome = outcome
         else:
-            entry.status = _DONE
-
-    def finalize(self, outcome: str, total_elapsed: Optional[float]) -> None:
-        # Any tool still "running" when the round ends was interrupted.
-        for entry in self._tools.values():
-            if entry.status == _RUNNING:
-                entry.status = _FAILED
-                if not entry.error:
-                    entry.error = "interrupted"
-        self._outcome = outcome
-        self._total_elapsed = total_elapsed
+            self._outcome = _DONE
 
     @property
-    def tool_count(self) -> int:
-        return len(self._order)
+    def outcome(self) -> str:
+        return self._outcome
 
     # -- render ---------------------------------------------------------
 
     def render(self) -> dict[str, Any]:
+        title, template, body = _OUTCOME_DISPLAY[self._outcome]
         return {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": self._header_title()},
-                "template": self._header_template(),
+                "title": {"tag": "plain_text", "content": title},
+                "template": template,
             },
-            "elements": self._render_elements(),
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": body}},
+            ],
         }
 
     def render_json_size(self) -> int:
         return len(json.dumps(self.render(), ensure_ascii=False))
-
-    def _header_title(self) -> str:
-        if self._outcome == "done":
-            return "✓ 已完成"
-        if self._outcome == "failed":
-            return "⚠ 部分失败"
-        if self._outcome == "interrupted":
-            return "⏸ 已中断"
-        return "💬 处理中"
-
-    def _header_template(self) -> str:
-        if self._outcome == "done":
-            return "green"
-        if self._outcome == "failed":
-            return "red"
-        if self._outcome == "interrupted":
-            return "orange"
-        return "blue"
-
-    def _render_elements(self) -> list[dict[str, Any]]:
-        elements: list[dict[str, Any]] = []
-        for tool_id in self._order:
-            entry = self._tools[tool_id]
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": _render_row(entry)}})
-            if entry.status == _FAILED and entry.error:
-                elements.append({
-                    "tag": "note",
-                    "elements": [{"tag": "plain_text", "content": f"⚠ {entry.error}"}],
-                })
-        elements.append({"tag": "hr"})
-        elements.append({
-            "tag": "note",
-            "elements": [{"tag": "plain_text", "content": self._render_footer()}],
-        })
-        return elements
-
-    def _render_footer(self) -> str:
-        parts = [f"🤖 {self._agent_label}", f"{self.tool_count} tools"]
-        if self._total_elapsed is not None:
-            parts.append(f"{self._total_elapsed:.1f}s")
-        return " · ".join(parts)
-
-
-def _render_row(entry: ToolEntry) -> str:
-    if entry.status == _RUNNING:
-        icon, suffix = "🔄", " · …"
-    elif entry.status == _FAILED:
-        icon = "✗"
-        suffix = f" · {_fmt_elapsed(entry.elapsed)}"
-    else:
-        icon = "✓"
-        suffix = f" · {_fmt_elapsed(entry.elapsed)}"
-    name = entry.name or "tool"
-    if entry.arg:
-        return f"**{icon} {name}**  `{entry.arg}`{suffix}"
-    return f"**{icon} {name}**{suffix}"
-
-
-def _fmt_elapsed(elapsed: Optional[float]) -> str:
-    return "…" if elapsed is None else f"{elapsed:.1f}s"
 
 
 class CardSender(Protocol):
@@ -263,25 +115,25 @@ class CardSender(Protocol):
 class ThrottledCardPatcher:
     """Owns the card message lifecycle: lazy create, then throttled PATCH.
 
-    The card message is created on the first flush (so a round with zero
-    tools never produces a card). After creation, tool changes are coalesced:
-    a PATCH fires on failure, every ``FLUSH_AFTER_CHANGES`` buffered changes,
-    or every ``FLUSH_AFTER_SECONDS`` — whichever is first. Mid-stream
-    auto-patching soft-stops at ``EDIT_SOFT_CAP`` so :meth:`finalize` always
-    has room for one final patch well under Feishu's 20-edit ceiling.
+    For the task-status card the lifecycle is intentionally minimal — the
+    runner drives ``flush_if_due`` to create the initial "running" card and
+    ``finalize`` to push the terminal state.  Mid-stream hooks are no-ops,
+    so the soft cap and time/change thresholds almost never fire, but the
+    safeguards are kept so a misbehaving caller cannot blow past Feishu's
+    limits.
     """
 
     def __init__(
         self,
         sender: CardSender,
-        builder: ToolCardBuilder,
+        card: TaskStatusCard,
         chat_id: str,
         *,
         reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         self._sender = sender
-        self._builder = builder
+        self._card = card
         self._chat_id = chat_id
         self._reply_to = reply_to
         self._metadata = metadata
@@ -301,35 +153,31 @@ class ThrottledCardPatcher:
         return self._edits
 
     def mark_pending(self) -> None:
-        """Record that the builder changed; call after each add_start/complete."""
+        """Record that the card state changed; call after each mutation."""
         self._pending_changes += 1
 
     async def flush_if_due(self, *, is_error: bool = False) -> None:
-        """Push the current builder state to the API if a threshold is met.
+        """Push the current card state to the API if a threshold is met.
 
-        A failure (``is_error``) flushes immediately regardless of the
-        timer/change-count, so failures surface without waiting on coalescing.
+        For the task-status card this is mainly used for the *initial* create
+        (``_message_id is None``) triggered by ``begin_tool_round``.  A
+        failure (``is_error``) always flushes immediately.
         """
         async with self._lock:
             now = time.monotonic()
-            timed_out = (now - self._last_flush) >= FLUSH_AFTER_SECONDS
-            enough_changes = self._pending_changes >= FLUSH_AFTER_CHANGES
             first = self._message_id is None
-            if not (is_error or timed_out or enough_changes or first):
+            if not (is_error or first or self._pending_changes >= 3
+                    or (now - self._last_flush) >= 1.5):
                 return
             await self._flush_locked()
 
-    async def finalize(self, outcome: str, total_elapsed: Optional[float]) -> None:
+    async def finalize(self, outcome: str) -> None:
         async with self._lock:
-            # A round with zero tools never created a card — leave no trace.
-            if self._message_id is None and self._builder.tool_count == 0:
-                return
-            self._builder.finalize(outcome, total_elapsed)
-            if self._builder.render_json_size() > CARD_BODY_MAX:
-                # Too big to PATCH safely — keep the last good mid-stream card.
+            self._card.finalize(outcome)
+            if self._card.render_json_size() > CARD_BODY_MAX:
                 logger.warning(
-                    "[Feishu] tool card final state %d bytes > %d cap — skipping final patch",
-                    self._builder.render_json_size(), CARD_BODY_MAX,
+                    "[Feishu] task card final state %d bytes > %d cap — skipping final patch",
+                    self._card.render_json_size(), CARD_BODY_MAX,
                 )
                 return
             # finalize always gets one best-effort patch, bypassing the soft cap.
@@ -339,7 +187,7 @@ class ThrottledCardPatcher:
     async def _flush_locked(self) -> None:
         if self._stopped:
             return
-        card_json = json.dumps(self._builder.render(), ensure_ascii=False)
+        card_json = json.dumps(self._card.render(), ensure_ascii=False)
         try:
             if self._message_id is None:
                 mid = await self._sender.create_tool_card(
@@ -351,7 +199,7 @@ class ThrottledCardPatcher:
                 if mid:
                     self._message_id = mid
                 else:
-                    logger.warning("[Feishu] tool card create failed — disabling card for this round")
+                    logger.warning("[Feishu] task card create failed — disabling card for this round")
                     self._stopped = True
                 return
 
@@ -361,16 +209,16 @@ class ThrottledCardPatcher:
             self._pending_changes = 0
             if not ok:
                 logger.warning(
-                    "[Feishu] tool card patch failed at edit #%d — freezing card",
+                    "[Feishu] task card patch failed at edit #%d — freezing card",
                     self._edits,
                 )
                 self._stopped = True
             elif self._edits >= EDIT_SOFT_CAP:
                 logger.info(
-                    "[Feishu] tool card hit soft edit cap (%d) — suppressing mid-stream patches",
+                    "[Feishu] task card hit soft edit cap (%d) — suppressing mid-stream patches",
                     self._edits,
                 )
                 self._stopped = True
         except Exception as exc:  # never let card delivery break the round
-            logger.warning("[Feishu] tool card flush error: %s", exc)
+            logger.warning("[Feishu] task card flush error: %s", exc)
             self._stopped = True

@@ -9,6 +9,8 @@ Supports:
   - Thread / topic replies (``root_id`` is mapped to ``thread_id``)
   - Streaming edit (``edit_message`` via ``im/v1/messages/:id`` PATCH)
   - Replying to an existing message (``reply_to``)
+  - Plain-text file attachments (``.txt`` / ``.json`` / ``.md`` / ...) are
+    downloaded and inlined into the agent prompt.
 
 Requirements::
 
@@ -20,6 +22,12 @@ Configuration (YAML or env vars)::
     FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     FEISHU_DOMAIN=https://open.feishu.cn          # or https://open.larksuite.com
     FEISHU_ALLOWED_USERS=ou_xxx,ou_yyy            # optional allowlist
+
+Required Feishu app permissions (configure in the developer console):
+  - ``im:message``               — send messages
+  - ``im:message.group_at_msg``  — receive group @-mentions
+  - ``im:resource``              — download inbound file attachments
+  - ``cardkit:card`` / ``cardkit:card:write`` — streaming cards (optional)
 """
 
 from __future__ import annotations
@@ -28,12 +36,11 @@ import asyncio
 import json
 import logging
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from agent_gateway.adapters.feishu_cards import (
-    ToolCardBuilder,
+    TaskStatusCard,
     ThrottledCardPatcher,
 )
 from agent_gateway.core.adapter import BasePlatformAdapter
@@ -56,16 +63,14 @@ def _check_feishu_deps() -> bool:
 
 @dataclass
 class _FeishuToolRound:
-    """Per-round tool-card state, returned by :meth:`begin_tool_round` as the
-    opaque handle the runner threads through the ``tool_round_*`` hooks."""
+    """Per-round task-status-card state, returned by :meth:`begin_tool_round`
+    as the opaque handle the runner threads through the ``tool_round_*`` hooks."""
 
     chat_id: str
     reply_to: Optional[str]
     metadata: Optional[dict[str, Any]]
-    builder: ToolCardBuilder
+    card: TaskStatusCard
     patcher: ThrottledCardPatcher
-    round_start: float
-    start_times: dict[str, float] = field(default_factory=dict)
     any_failed: bool = False
     finished: bool = False
 
@@ -394,7 +399,23 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[dict[str, Any]],
     ) -> SendResult:
-        """Send a plain text message (fallback path)."""
+        """Fallback send path.
+
+        For non-reply messages we prefer a markdown card (so agent output with
+        ``**bold**`` / lists / code renders properly).  Replies fall back to
+        plain ``text`` — Feishu's reply endpoint has poor ``interactive``
+        support.  If the markdown card fails we degrade further to plain text.
+        """
+        # Non-reply path: try a markdown card first for rich rendering.
+        if not reply_to:
+            card_result = await self._send_markdown_card(chat_id, content, metadata)
+            if card_result.success:
+                return card_result
+            logger.debug(
+                "[Feishu] markdown card failed (%s) — falling back to plain text",
+                card_result.error,
+            )
+
         try:
             from lark_oapi.api.im.v1 import (
                 CreateMessageRequest,
@@ -447,6 +468,61 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.exception("[Feishu] _send_plain_text() failed")
             return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def _send_markdown_card(
+        self,
+        chat_id: str,
+        content: str,
+        metadata: Optional[dict[str, Any]],
+    ) -> SendResult:
+        """Send ``content`` rendered as markdown inside a v1 interactive card.
+
+        This is the rich-rendering fallback used when CardKit (schema 2.0
+        streaming cards) is unavailable.  Uses the same ``lark_md`` element
+        as the task-status card so ``**bold**`` / inline code / links render.
+        One-shot send — the result is not registered in ``_card_ids`` (no
+        follow-up edits expected).
+        """
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        try:
+            from lark_oapi.api.im.v1 import (
+                CreateMessageRequest,
+                CreateMessageRequestBody,
+            )
+
+            card_json = json.dumps({
+                "config": {"wide_screen_mode": True},
+                "elements": [
+                    {"tag": "div", "text": {"tag": "lark_md", "content": content or " "}},
+                ],
+            })
+
+            receive_id_type = (metadata or {}).get("receive_id_type", "chat_id")
+            req = (
+                CreateMessageRequest.builder()
+                .receive_id_type(receive_id_type)
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .msg_type("interactive")
+                    .content(card_json)
+                    .build()
+                )
+                .build()
+            )
+            resp = await asyncio.to_thread(self._client.im.v1.message.create, req)
+            if not resp.success():
+                return SendResult(
+                    success=False,
+                    error=f"[{resp.code}] {resp.msg}",
+                    retryable=True,
+                )
+            msg_id = getattr(resp.data, "message_id", None) if resp.data else None
+            return SendResult(success=True, message_id=msg_id)
+        except Exception as exc:
+            logger.debug("[Feishu] _send_markdown_card error: %s", exc)
+            return SendResult(success=False, error=str(exc))
 
     async def edit_message(
         self,
@@ -591,7 +667,7 @@ class FeishuAdapter(BasePlatformAdapter):
         return None
 
     # ------------------------------------------------------------------
-    # Tool-call card streaming (round lifecycle)
+    # Task-status card streaming (round lifecycle)
     # ------------------------------------------------------------------
 
     def supports_tool_card(self) -> bool:
@@ -606,58 +682,46 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Optional[_FeishuToolRound]:
         if not self._client:
             return None
-        builder = ToolCardBuilder()
+        card = TaskStatusCard()
         patcher = ThrottledCardPatcher(
-            self, builder, chat_id, reply_to=reply_to, metadata=metadata,
+            self, card, chat_id, reply_to=reply_to, metadata=metadata,
         )
-        return _FeishuToolRound(
+        handle = _FeishuToolRound(
             chat_id=chat_id,
             reply_to=reply_to,
             metadata=metadata,
-            builder=builder,
+            card=card,
             patcher=patcher,
-            round_start=time.monotonic(),
         )
+        # Immediately create the "running" card so the user sees the task has
+        # started, without waiting for the first tool event.
+        patcher.mark_pending()
+        await patcher.flush_if_due()
+        return handle
 
     async def tool_round_start(self, handle: Optional[_FeishuToolRound], tool: dict[str, Any]) -> None:
-        if handle is None:
-            return
-        tool_id = tool.get("tool_id") or ""
-        handle.start_times[tool_id] = time.monotonic()
-        handle.builder.add_start(tool_id, tool.get("name", "tool"), tool.get("input"))
-        handle.patcher.mark_pending()
-        # The first tool forces card creation, so the "💬 处理中" card appears
-        # immediately rather than waiting on the coalesce timer.
-        await handle.patcher.flush_if_due()
+        # The status card only tracks overall task state, not individual tools.
+        return
 
     async def tool_round_complete(self, handle: Optional[_FeishuToolRound], tool: dict[str, Any]) -> None:
+        # Only track whether any tool failed, so end_tool_round can pick the
+        # right terminal state. No mid-stream card update.
         if handle is None:
             return
-        tool_id = tool.get("tool_id") or ""
-        started = handle.start_times.pop(tool_id, None)
-        elapsed = (time.monotonic() - started) if started is not None else None
-        is_error = bool(tool.get("is_error"))
-        handle.any_failed = handle.any_failed or is_error
-        handle.builder.add_complete(
-            tool_id, elapsed=elapsed, is_error=is_error,
-            error=str(tool.get("error_message") or ""),
-        )
-        handle.patcher.mark_pending()
-        # Failures surface immediately; successes respect the coalesce timer.
-        await handle.patcher.flush_if_due(is_error=is_error)
+        if bool(tool.get("is_error")):
+            handle.any_failed = True
 
     async def end_tool_round(self, handle: Optional[_FeishuToolRound], *, success: bool = True) -> None:
         if handle is None or handle.finished:
             return
         handle.finished = True
-        total = time.monotonic() - handle.round_start
         if not success:
             outcome = "interrupted"
         elif handle.any_failed:
             outcome = "failed"
         else:
             outcome = "done"
-        await handle.patcher.finalize(outcome, total)
+        await handle.patcher.finalize(outcome)
 
     # -- Card delivery (CardSender protocol) -------------------------------
 
@@ -789,8 +853,10 @@ class FeishuAdapter(BasePlatformAdapter):
                 message_id, message_type, chat_id_raw,
             )
 
-            # First version: only handle text messages
-            if message_type != "text":
+            # Handle text + plain-text file attachments (.txt/.json/.md).
+            # Other message types (image, audio, post, interactive, ...) are
+            # still ignored — see _extract_file_attachment for the allowlist.
+            if message_type not in ("text", "file"):
                 logger.debug(
                     "[Feishu] Ignoring non-text message type=%s message_id=%s",
                     message_type,
@@ -805,6 +871,26 @@ class FeishuAdapter(BasePlatformAdapter):
             if not chat_id or user_id is None:
                 logger.warning("[Feishu] Incomplete event (no chat_id or user_id) — dropping")
                 return
+
+            # File messages: download and inline recognised text files.
+            media_urls: list[str] = []
+            media_types: list[str] = []
+            msg_type_enum = MessageType.TEXT
+            if message_type == "file":
+                attachment = self._extract_file_attachment(msg)
+                if attachment is not None:
+                    file_data, file_name = attachment
+                    from agent_gateway.media.cache import MediaCache
+                    cache = MediaCache()
+                    path = cache.save_document(file_data, filename=file_name)
+                    media_urls.append(path)
+                    media_types.append("application/octet-stream")
+                    msg_type_enum = MessageType.DOCUMENT
+                    # Small text files are inlined into MessageEvent.text so
+                    # agents without attachment awareness still see the content.
+                    inline = self._inline_text(file_data, file_name)
+                    if inline is not None:
+                        text = (text + "\n\n" if text else "") + inline
 
             # chat_type: "p2p" (DM) or "group"
             chat_type_raw = getattr(msg, "chat_type", "") or ""
@@ -823,11 +909,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
             evt = MessageEvent(
                 text=text,
-                message_type=MessageType.TEXT,
+                message_type=msg_type_enum,
                 source=source,
                 message_id=getattr(msg, "message_id", None),
                 reply_to_message_id=getattr(msg, "message_id", None) or None,
                 raw_message={"event": event},
+                media_urls=media_urls,
+                media_types=media_types,
             )
 
             if self._main_loop is not None and not self._main_loop.is_closed():
@@ -879,6 +967,91 @@ class FeishuAdapter(BasePlatformAdapter):
             or getattr(sid, "user_id", None)
             or getattr(sid, "union_id", None)
         )
+
+    # -- File attachment handling -----------------------------------------
+
+    # Extensions we inline into MessageEvent.text as plain text.  Binary /
+    # office formats are downloaded to media_urls but never inlined.
+    _INLINE_TEXT_EXTS = frozenset({".txt", ".json", ".md", ".markdown", ".csv", ".log", ".yaml", ".yml"})
+    # Hard cap for inlining — larger files stay in media_urls only, otherwise
+    # a 5 MB log would blow up the agent's prompt.
+    _INLINE_MAX_BYTES = 32_768
+
+    def _extract_file_attachment(self, msg: Any) -> Optional[tuple[bytes, str]]:
+        """Download a ``file`` message's payload.
+
+        Returns ``(data, filename)`` or ``None`` if the file is not recognised
+        text, the message is malformed, or the download fails.  Runs on the ws
+        thread (synchronous SDK call) — file messages are infrequent enough
+        that blocking is acceptable.
+        """
+        if not self._client:
+            return None
+        try:
+            message_id = getattr(msg, "message_id", None)
+            raw = getattr(msg, "content", "") or ""
+            parsed = json.loads(raw) if raw else {}
+            file_key = parsed.get("file_key") if isinstance(parsed, dict) else None
+            file_name = parsed.get("file_name") or "file"
+            if not message_id or not file_key:
+                logger.debug(
+                    "[Feishu] file message missing message_id/file_key — skipping"
+                )
+                return None
+
+            from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+            req = (
+                GetMessageResourceRequest.builder()
+                .message_id(message_id)
+                .file_key(file_key)
+                .type("file")
+                .build()
+            )
+            resp = self._client.im.v1.message_resource.get(req)
+            if not resp.success() or resp.file is None:
+                logger.warning(
+                    "[Feishu] file download failed: [%s] %s",
+                    getattr(resp, "code", "?"), getattr(resp, "msg", "?"),
+                )
+                return None
+            data = resp.file.read()
+            resp.file.close()
+            logger.debug(
+                "[Feishu] downloaded attachment %s (%d bytes)",
+                file_name, len(data),
+            )
+            return data, file_name
+        except Exception as exc:
+            logger.warning("[Feishu] _extract_file_attachment error: %s", exc)
+            return None
+
+    def _inline_text(self, data: bytes, filename: str) -> Optional[str]:
+        """Return the file content as a fenced text block, or ``None`` if it
+        should not be inlined (binary extension or too large)."""
+        from pathlib import Path
+        ext = Path(filename).suffix.lower()
+        if ext not in self._INLINE_TEXT_EXTS:
+            return None
+        if len(data) > self._INLINE_MAX_BYTES:
+            logger.debug(
+                "[Feishu] %s is %d bytes (> %d) — not inlining, kept in media_urls",
+                filename, len(data), self._INLINE_MAX_BYTES,
+            )
+            return None
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            # Not valid UTF-8 — probably a mislabelled binary; skip.
+            return None
+        # Map extension → markdown fence language for nicer rendering.
+        lang_map = {
+            ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+            ".md": "markdown", ".markdown": "markdown",
+        }
+        lang = lang_map.get(ext, "")
+        fence = f"```{lang}" if lang else "```"
+        return f"[文件: {filename}]\n{fence}\n{content}\n```"
 
 
 # ----------------------------------------------------------------------
