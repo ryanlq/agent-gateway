@@ -100,11 +100,11 @@ class TaskStatusCard:
         elements: list[dict[str, Any]] = []
 
         # Show content if available (agent response)
-        # Use div+lark_md for PATCH compatibility (tag:markdown may not work with PATCH API)
+        # Use tag:markdown for full markdown support (code blocks, headings, etc.)
         if self._content:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": self._content}})
+            elements.append({"tag": "markdown", "content": self._content})
         else:
-            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+            elements.append({"tag": "markdown", "content": body})
 
         return {
             "config": {"wide_screen_mode": True},
