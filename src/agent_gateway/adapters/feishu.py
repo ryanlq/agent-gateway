@@ -494,7 +494,7 @@ class FeishuAdapter(BasePlatformAdapter):
             card_json = json.dumps({
                 "config": {"wide_screen_mode": True},
                 "elements": [
-                    {"tag": "div", "text": {"tag": "lark_md", "content": content or " "}},
+                    {"tag": "markdown", "content": content or " "},
                 ],
             })
 
