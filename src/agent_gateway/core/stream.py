@@ -54,6 +54,14 @@ class StreamConsumerConfig:
     exactly one complete response.
     """
 
+    suppress_send: bool = False
+    """Suppress all platform sends — content is delivered via tool card.
+
+    When True, ``finish()`` returns a dummy SendResult without calling
+    ``adapter.send()``.  The caller is responsible for delivering the
+    content through the tool card lifecycle.
+    """
+
 
 class StreamConsumer:
     """
@@ -198,6 +206,10 @@ class StreamConsumer:
                 "Stream finished with empty content for %s — sending fallback",
                 self.chat_id,
             )
+
+        # When suppress_send is True, content is delivered via tool card.
+        if self.config.suppress_send:
+            return SendResult(success=True, message_id=None)
 
         # In final-only mode, no intermediate message was sent, so just
         # deliver the complete response as a single fresh message.

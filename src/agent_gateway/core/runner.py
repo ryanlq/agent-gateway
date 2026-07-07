@@ -411,6 +411,9 @@ class GatewayRunner:
             return await self._call_agent(event, session, user_input, context_extra)
 
         # Create stream consumer for the platform adapter
+        # When tool card is active, suppress all platform sends —
+        # the card will be the single visible message.
+        use_tool_card = adapter.supports_tool_card()
         stream_config = StreamConsumerConfig(
             min_edit_interval=self.config.streaming.min_edit_interval,
             use_draft=self.config.streaming.use_draft,
@@ -420,6 +423,8 @@ class GatewayRunner:
             # all output and send a single final message — intermediate sends
             # would create duplicate, un-editable messages.
             send_final_only=not adapter.supports_edit(),
+            # Suppress all sends when tool card is active — content goes into the card.
+            suppress_send=use_tool_card,
         )
         consumer_metadata = {"thread_id": source.thread_id} if source.thread_id else None
         consumer = StreamConsumer(
