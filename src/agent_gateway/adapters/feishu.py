@@ -409,8 +409,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         For non-reply messages we prefer a markdown card (so agent output with
         ``**bold**`` / lists / code renders properly).  Replies fall back to
-        plain ``text`` — Feishu's reply endpoint has poor ``interactive``
-        support.  If the markdown card fails we degrade further to plain text.
+        post (rich text) — Feishu's reply endpoint has poor ``interactive``
+        support.  If the markdown card fails we degrade to post, then to text.
         """
         logger.debug("[Feishu] _send_plain_text() reply_to=%s", reply_to)
 
@@ -421,10 +421,21 @@ class FeishuAdapter(BasePlatformAdapter):
                 logger.debug("[Feishu] _send_plain_text() markdown card succeeded")
                 return card_result
             logger.warning(
-                "[Feishu] markdown card failed (%s) — falling back to plain text",
+                "[Feishu] markdown card failed (%s) — falling back to post",
                 card_result.error,
             )
 
+        # Try post (rich text) as fallback — supports line breaks and basic formatting.
+        post_result = await self._send_post(chat_id, content, reply_to, metadata)
+        if post_result.success:
+            logger.debug("[Feishu] _send_plain_text() post succeeded")
+            return post_result
+        logger.warning(
+            "[Feishu] post failed (%s) — falling back to plain text",
+            post_result.error,
+        )
+
+        # Final fallback: plain text.
         logger.debug("[Feishu] _send_plain_text() falling back to text msg_type")
         try:
             from lark_oapi.api.im.v1 import (
@@ -477,6 +488,86 @@ class FeishuAdapter(BasePlatformAdapter):
 
         except Exception as exc:
             logger.exception("[Feishu] _send_plain_text() failed")
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def _send_post(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[dict[str, Any]],
+    ) -> SendResult:
+        """Send ``content`` as a Feishu post (rich text) message.
+
+        Post messages support line breaks, bold, italic, links, and @mentions
+        natively.  This is the preferred fallback when interactive cards fail.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        try:
+            from lark_oapi.api.im.v1 import (
+                CreateMessageRequest,
+                CreateMessageRequestBody,
+                ReplyMessageRequest,
+                ReplyMessageRequestBody,
+            )
+
+            # Build post content: split by newlines, each line becomes a paragraph.
+            lines = content.split("\n") if content else [" "]
+            post_content = []
+            for line in lines:
+                post_content.append([{"tag": "text", "text": line}])
+
+            post_body = json.dumps({
+                "post": {
+                    "zh_cn": {
+                        "title": "",
+                        "content": post_content,
+                    }
+                }
+            })
+
+            if reply_to:
+                req = (
+                    ReplyMessageRequest.builder()
+                    .message_id(reply_to)
+                    .request_body(
+                        ReplyMessageRequestBody.builder()
+                        .msg_type("post")
+                        .content(post_body)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await asyncio.to_thread(self._client.im.v1.message.reply, req)
+            else:
+                receive_id_type = (metadata or {}).get("receive_id_type", "chat_id")
+                req = (
+                    CreateMessageRequest.builder()
+                    .receive_id_type(receive_id_type)
+                    .request_body(
+                        CreateMessageRequestBody.builder()
+                        .receive_id(chat_id)
+                        .msg_type("post")
+                        .content(post_body)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await asyncio.to_thread(self._client.im.v1.message.create, req)
+
+            if not resp.success():
+                logger.warning("[Feishu] _send_post failed: [%s] %s", resp.code, resp.msg)
+                return SendResult(
+                    success=False,
+                    error=f"[{resp.code}] {resp.msg}",
+                    retryable=True,
+                )
+            msg_id = getattr(resp.data, "message_id", None) if resp.data else None
+            logger.debug("[Feishu] _send_post success, msg_id=%s", msg_id)
+            return SendResult(success=True, message_id=msg_id)
+        except Exception as exc:
+            logger.warning("[Feishu] _send_post error: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
 
     async def _send_markdown_card(
