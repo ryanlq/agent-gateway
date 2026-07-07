@@ -653,19 +653,26 @@ class FeishuAdapter(BasePlatformAdapter):
         if card_id:
             return await self._edit_cardkit(card_id, message_id, content, finalize)
 
-        # Plain text message — try legacy PATCH API
+        # Update as interactive card with markdown rendering
         try:
             from lark_oapi.api.im.v1 import (
                 PatchMessageRequest,
                 PatchMessageRequestBody,
             )
 
+            card_json = json.dumps({
+                "config": {"wide_screen_mode": True},
+                "elements": [
+                    {"tag": "markdown", "content": content or " "},
+                ],
+            })
+
             req = (
                 PatchMessageRequest.builder()
                 .message_id(message_id)
                 .request_body(
                     PatchMessageRequestBody.builder()
-                    .content(json.dumps({"text": content}))
+                    .content(card_json)
                     .build()
                 )
                 .build()
