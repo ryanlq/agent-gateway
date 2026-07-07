@@ -284,10 +284,16 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
+        logger.debug(
+            "[Feishu] send() reply_to=%s, cardkit_available=%s, content_len=%d",
+            reply_to, self._cardkit_available, len(content) if content else 0,
+        )
+
         # Try CardKit streaming card for new messages (not replies)
         if not reply_to and self._cardkit_available is not False:
             result = await self._send_cardkit_card(chat_id, content, metadata)
             if result.success:
+                logger.debug("[Feishu] send() CardKit success")
                 return result
             if self._cardkit_available is None:
                 logger.warning(
@@ -406,16 +412,20 @@ class FeishuAdapter(BasePlatformAdapter):
         plain ``text`` — Feishu's reply endpoint has poor ``interactive``
         support.  If the markdown card fails we degrade further to plain text.
         """
+        logger.debug("[Feishu] _send_plain_text() reply_to=%s", reply_to)
+
         # Non-reply path: try a markdown card first for rich rendering.
         if not reply_to:
             card_result = await self._send_markdown_card(chat_id, content, metadata)
             if card_result.success:
+                logger.debug("[Feishu] _send_plain_text() markdown card succeeded")
                 return card_result
-            logger.debug(
+            logger.warning(
                 "[Feishu] markdown card failed (%s) — falling back to plain text",
                 card_result.error,
             )
 
+        logger.debug("[Feishu] _send_plain_text() falling back to text msg_type")
         try:
             from lark_oapi.api.im.v1 import (
                 CreateMessageRequest,
@@ -478,12 +488,13 @@ class FeishuAdapter(BasePlatformAdapter):
         """Send ``content`` rendered as markdown inside a v1 interactive card.
 
         This is the rich-rendering fallback used when CardKit (schema 2.0
-        streaming cards) is unavailable.  Uses the same ``lark_md`` element
-        as the task-status card so ``**bold**`` / inline code / links render.
+        streaming cards) is unavailable.  Uses the ``markdown`` element
+        so headings, code blocks, tables, lists, etc. render properly.
         One-shot send — the result is not registered in ``_card_ids`` (no
         follow-up edits expected).
         """
         if not self._client:
+            logger.debug("[Feishu] _send_markdown_card: no client")
             return SendResult(success=False, error="Not connected")
         try:
             from lark_oapi.api.im.v1 import (
@@ -497,6 +508,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     {"tag": "markdown", "content": content or " "},
                 ],
             })
+            logger.debug("[Feishu] _send_markdown_card card_json: %s", card_json[:200])
 
             receive_id_type = (metadata or {}).get("receive_id_type", "chat_id")
             req = (
@@ -513,15 +525,17 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             resp = await asyncio.to_thread(self._client.im.v1.message.create, req)
             if not resp.success():
+                logger.warning("[Feishu] _send_markdown_card failed: [%s] %s", resp.code, resp.msg)
                 return SendResult(
                     success=False,
                     error=f"[{resp.code}] {resp.msg}",
                     retryable=True,
                 )
             msg_id = getattr(resp.data, "message_id", None) if resp.data else None
+            logger.debug("[Feishu] _send_markdown_card success, msg_id=%s", msg_id)
             return SendResult(success=True, message_id=msg_id)
         except Exception as exc:
-            logger.debug("[Feishu] _send_markdown_card error: %s", exc)
+            logger.warning("[Feishu] _send_markdown_card error: %s", exc)
             return SendResult(success=False, error=str(exc))
 
     async def edit_message(
