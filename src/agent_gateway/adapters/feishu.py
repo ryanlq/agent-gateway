@@ -518,14 +518,23 @@ class FeishuAdapter(BasePlatformAdapter):
             for line in lines:
                 post_content.append([{"tag": "text", "text": line}])
 
-            post_body = json.dumps({
-                "post": {
-                    "zh_cn": {
-                        "title": "",
+            # Feishu uses zh_cn locale; Lark international works without locale wrapper.
+            # Detect by checking if domain contains "larksuite".
+            if "larksuite" in self._domain:
+                post_body = json.dumps({
+                    "post": {
                         "content": post_content,
                     }
-                }
-            })
+                })
+            else:
+                post_body = json.dumps({
+                    "post": {
+                        "zh_cn": {
+                            "title": "",
+                            "content": post_content,
+                        }
+                    }
+                })
 
             if reply_to:
                 req = (
