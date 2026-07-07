@@ -602,6 +602,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 CreateMessageRequestBody,
             )
 
+            # Debug: log raw content to diagnose line break issues
+            logger.info("[Feishu] _send_markdown_card raw content (repr): %r", content[:200] if content else "")
+
             card_json = json.dumps({
                 "config": {"wide_screen_mode": True},
                 "elements": [
@@ -652,6 +655,9 @@ class FeishuAdapter(BasePlatformAdapter):
         card_id = self._card_ids.get(message_id)
         if card_id:
             return await self._edit_cardkit(card_id, message_id, content, finalize)
+
+        # Debug: log raw content to diagnose line break issues
+        logger.info("[Feishu] edit_message raw content (repr): %r", content[:200] if content else "")
 
         # Update as interactive card with markdown rendering
         try:
