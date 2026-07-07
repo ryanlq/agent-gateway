@@ -594,7 +594,7 @@ class GatewayRunner:
             result = await consumer.finish(full_text)
 
             if tool_handle is not None:
-                await adapter.end_tool_round(tool_handle, success=True)
+                await adapter.end_tool_round(tool_handle, success=True, content=full_text)
 
             # Post-process cron operations in streaming response
             # Note: the raw block may have been streamed to the platform already,
@@ -648,7 +648,7 @@ class GatewayRunner:
             full_text += error_text
             await consumer.finish(full_text)
             if tool_handle is not None:
-                await adapter.end_tool_round(tool_handle, success=False)
+                await adapter.end_tool_round(tool_handle, success=False, content=full_text)
             if desktop_sid and self.desktop_emit:
                 await self.desktop_emit("message.delta", {"text": error_text}, desktop_sid)
                 await self.desktop_emit("message.complete", {"text": full_text}, desktop_sid)

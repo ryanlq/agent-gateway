@@ -816,7 +816,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if bool(tool.get("is_error")):
             handle.any_failed = True
 
-    async def end_tool_round(self, handle: Optional[_FeishuToolRound], *, success: bool = True) -> None:
+    async def end_tool_round(self, handle: Optional[_FeishuToolRound], *, success: bool = True, content: str = "") -> None:
         if handle is None or handle.finished:
             return
         handle.finished = True
@@ -826,7 +826,7 @@ class FeishuAdapter(BasePlatformAdapter):
             outcome = "failed"
         else:
             outcome = "done"
-        await handle.patcher.finalize(outcome)
+        await handle.patcher.finalize(outcome, content)
 
     # -- Card delivery (CardSender protocol) -------------------------------
 

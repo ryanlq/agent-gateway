@@ -301,12 +301,13 @@ class BasePlatformAdapter(ABC):
         ``error_message``.
         """
 
-    async def end_tool_round(self, handle: Any, *, success: bool = True) -> None:
+    async def end_tool_round(self, handle: Any, *, success: bool = True, content: str = "") -> None:
         """The agent round ended. Finalise any streaming card.
 
         ``success=False`` indicates the round was interrupted (agent error /
         stream exception); adapters should still close the card, marking any
         still-running tools as interrupted.
+        ``content`` is the agent's response text to display in the card.
         """
 
     # -- Media delivery -----------------------------------------------------

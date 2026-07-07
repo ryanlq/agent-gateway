@@ -66,8 +66,9 @@ class TaskStatusCard:
 
     def __init__(self) -> None:
         self._outcome: str = _RUNNING
+        self._content: str = ""  # Agent response content
 
-    def finalize(self, outcome: str) -> None:
+    def finalize(self, outcome: str, content: str = "") -> None:
         """Transition the card to its terminal state.
 
         ``outcome`` is one of ``"done"`` / ``"failed"`` / ``"interrupted"``;
@@ -77,24 +78,40 @@ class TaskStatusCard:
             self._outcome = outcome
         else:
             self._outcome = _DONE
+        if content:
+            self._content = content
+
+    def update_content(self, content: str) -> None:
+        """Update the card content (agent response text)."""
+        self._content = content
 
     @property
     def outcome(self) -> str:
         return self._outcome
 
+    @property
+    def content(self) -> str:
+        return self._content
+
     # -- render ---------------------------------------------------------
 
     def render(self) -> dict[str, Any]:
         title, template, body = _OUTCOME_DISPLAY[self._outcome]
+        elements: list[dict[str, Any]] = []
+
+        # Show content if available (agent response)
+        if self._content:
+            elements.append({"tag": "markdown", "content": self._content})
+        else:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": body}})
+
         return {
             "config": {"wide_screen_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": template,
             },
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": body}},
-            ],
+            "elements": elements,
         }
 
     def render_json_size(self) -> int:
@@ -171,9 +188,9 @@ class ThrottledCardPatcher:
                 return
             await self._flush_locked()
 
-    async def finalize(self, outcome: str) -> None:
+    async def finalize(self, outcome: str, content: str = "") -> None:
         async with self._lock:
-            self._card.finalize(outcome)
+            self._card.finalize(outcome, content)
             if self._card.render_json_size() > CARD_BODY_MAX:
                 logger.warning(
                     "[Feishu] task card final state %d bytes > %d cap — skipping final patch",
