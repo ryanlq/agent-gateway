@@ -122,7 +122,8 @@ class StreamConsumer:
 
         self._buffer += text
 
-        if self.config.send_final_only:
+        # When suppress_send is True, don't send anything to the platform.
+        if self.config.suppress_send or self.config.send_final_only:
             return
 
         now = time.monotonic()
@@ -274,6 +275,10 @@ class StreamConsumer:
     async def _flush(self) -> None:
         """Push the current buffer content to the platform."""
         if not self._buffer:
+            return
+
+        # When suppress_send is True, don't send anything to the platform.
+        if self.config.suppress_send:
             return
 
         self._last_edit_time = time.monotonic()
