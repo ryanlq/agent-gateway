@@ -152,7 +152,7 @@ def run_adapter_check() -> int:
 # Agent callback — bridges GatewayRunner → CLIAgentBridge
 # ---------------------------------------------------------------------------
 
-def make_agent_callback(*, agent_timeout: float = 1800.0) -> Any:
+def make_agent_callback(*, agent_timeout: float | None = None) -> Any:
     """Create an async agent callback for the ``GatewayRunner``.
 
     The callback creates a ``CLIAgentBridge`` (claude-code / pi)

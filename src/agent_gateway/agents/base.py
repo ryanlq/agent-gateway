@@ -93,8 +93,8 @@ class SubprocessConfig:
     command: list[str]
     """CLI command and fixed arguments, e.g. ``["claude", "--print"]``."""
 
-    timeout: float = 1200.0
-    """Max seconds per invocation."""
+    timeout: float | None = None
+    """Max seconds per invocation. ``None`` means no limit."""
 
     max_output_bytes: int = 1_000_000
     """Max stdout bytes to capture (prevents runaway output)."""

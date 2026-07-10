@@ -42,4 +42,4 @@ session:
 
 # Operational settings
 filter_silence_narration: true
-agent_timeout: 1800        # 30 minute agent processing timeout
+agent_timeout: null         # null = no limit; or set seconds (e.g. 1800)

@@ -63,7 +63,7 @@ class ClaudeCodeSdkBridge(CLIAgentBridge):
         *,
         model: str | None = None,
         max_turns: int = 20,
-        timeout: float = 1200.0,
+        timeout: float | None = None,
         permission_mode: str = "acceptEdits",
         allowed_tools: str | None = None,
         disallowed_tools: str | None = None,

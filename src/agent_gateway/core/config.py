@@ -170,8 +170,12 @@ class GatewayConfig:
     filter_silence_narration: bool = True
     """Whether to drop silence-narration outbound messages."""
 
-    agent_timeout: float = 1800.0
-    """Maximum time (seconds) for agent processing before timeout."""
+    agent_timeout: float | None = None
+    """Maximum time (seconds) for agent processing before timeout.
+
+    ``None`` (default) means no limit — the agent runs until it naturally
+    finishes.  Set to a number of seconds to enforce a hard deadline.
+    """
 
     # -- Loading -------------------------------------------------------------
 
@@ -233,7 +237,7 @@ class GatewayConfig:
 
         # Top-level flags
         config.filter_silence_narration = data.get("filter_silence_narration", True)
-        config.agent_timeout = float(data.get("agent_timeout", 1800))
+        config.agent_timeout = float(data["agent_timeout"]) if data.get("agent_timeout") not in (None, "", "none", "unlimited") else None
 
         return config
 

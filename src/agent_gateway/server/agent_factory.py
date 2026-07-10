@@ -39,6 +39,12 @@ def _coerce_params(cls: type, kwargs: dict) -> dict:
         ann = param.annotation
         # With ``from __future__ import annotations``, annotations are strings.
         ann_name = ann if isinstance(ann, str) else getattr(ann, "__name__", "")
+        # Normalize ``"float | None"`` / ``"Optional[float]"`` → ``"float"``
+        # so union-with-None annotations coerce the same as their base type.
+        for base in ("bool", "int", "float"):
+            if base in ann_name:
+                ann_name = base
+                break
         val = coerced[key]
         if ann_name == "bool" and isinstance(val, str):
             coerced[key] = val.lower() in ("true", "1", "yes")
