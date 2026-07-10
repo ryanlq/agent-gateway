@@ -57,7 +57,7 @@ class PiAgentBridge(CLIAgentBridge):
         *,
         command: str = "pi",
         mode: str = "json",
-        timeout: float = 120.0,
+        timeout: float | None = None,
         max_output_bytes: int = 2_000_000,
         idle_timeout: float = 300.0,
         max_concurrent: int = 10,

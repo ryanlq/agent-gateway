@@ -19,7 +19,7 @@ from agent_gateway.agents.base import (
 class TestSubprocessConfig:
     def test_defaults(self):
         cfg = SubprocessConfig(command=["echo"])
-        assert cfg.timeout == 1200.0
+        assert cfg.timeout is None
         assert cfg.max_output_bytes == 1_000_000
         assert cfg.idle_timeout == 300.0
         assert cfg.max_concurrent == 10

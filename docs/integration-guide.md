@@ -725,7 +725,7 @@ session:
 
 # ── 运维 ──
 filter_silence_narration: true  # 过滤静音叙述（防循环）
-agent_timeout: 1800             # Agent 处理超时（秒）
+agent_timeout: null             # null = 不限制；或填秒数，如 1800
 ```
 
 ### 6.2 环境变量覆盖
